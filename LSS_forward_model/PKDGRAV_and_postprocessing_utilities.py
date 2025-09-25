@@ -231,7 +231,12 @@ def read_sims_params(path):
         # Extract density parameters
         Omega_b   = (background['rho_b'][()]      / background['rho_crit'][()])[-1]
         Omega0_cdm = (background['rho_cdm'][()]    / background['rho_crit'][()])[-1]
-        Omega_nu  = ((background['rho_ncdm[0]'][()] +background['rho_ncdm[1]'][()] +background['rho_ncdm[2]'][()] )/ background['rho_crit'][()])[-1]
+        try:
+            Omega_nu  = ((background['rho_ncdm[0]'][()] +background['rho_ncdm[1]'][()] +background['rho_ncdm[2]'][()] )/ background['rho_crit'][()])[-1]
+        except:
+            Omega_nu  = (background['rho_ncdm[0]'][()]/ background['rho_crit'][()])[-1]
+      
+            
         Omega_r   = (background['rho_g'][()]      / background['rho_crit'][()])[-1]
         Omega_m   = Omega_b + Omega0_cdm + Omega_nu
 
@@ -942,3 +947,89 @@ def g2k_sphere(gamma1, gamma2, mask, nside=1024, lmax=2048):
 
     return E_map, B_map, almsE, alms
 
+
+
+def shift_nz(z, nz, z_rebinned, delta_z=0.0, renorm="source"):
+    """
+    Evaluate the shifted n(z - delta_z) on z_rebinned.
+    
+    Parameters
+    ----------
+    z : array-like
+        Original redshift grid (must be monotonic).
+    nz : array-like
+        n(z) sampled on `z`. Can be normalized or not.
+    z_rebinned : array-like
+        Target redshift grid where you want the shifted n(z) evaluated.
+    delta_z : float, optional
+        Shift to apply (positive shifts the distribution to higher observed z).
+    renorm : {"none", "source", "target"}, optional
+        - "none": no renormalization.
+        - "source": scale to preserve the original integral ∫ n(z) dz over the original z grid.
+        - "target": scale to unit integral over z_rebinned after shifting.
+    
+    Returns
+    -------
+    nz_shifted : np.ndarray
+        The shifted n(z) evaluated on z_rebinned.
+    """
+    z = np.asarray(z)
+    nz = np.asarray(nz)
+    zr = np.asarray(z_rebinned)
+
+    # Query positions: n(z - delta_z) evaluated at zr  -> sample original at (zr - delta_z)
+    z_query = zr - delta_z
+
+    # Linear interpolation with zero outside support
+    nz_shifted = np.interp(z_query, z, nz, left=0.0, right=0.0)
+
+    if renorm is not None and renorm != "none":
+        if renorm == "source":
+            area_src = np.trapz(nz, z)
+            area_new = np.trapz(nz_shifted, zr)
+            # match the original area (if nz was normalized, this keeps it normalized)
+            if area_new > 0:
+                nz_shifted *= (area_src / area_new)
+        elif renorm == "target":
+            area_new = np.trapz(nz_shifted, zr)
+            if area_new > 0:
+                nz_shifted /= area_new
+        else:
+            raise ValueError("renorm must be one of {'none','source','target'}")
+
+    return nz_shifted
+
+
+def F_nla(z, om0, A_ia, rho_c1, eta=0.0, z0=0.0, cosmo=None):
+    z = np.asarray(z, dtype=float)
+    a = 1.0 / (1.0 + z)
+    if cosmo is None:
+        raise ValueError("Pass a pyccl.Cosmology as `cosmo` to use CCL growth.")
+    D = ccl.growth_factor(cosmo, a)          # normalized to 1 at a=1
+    return -A_ia * rho_c1 * om0 * ((1+z)/(1+z0))**eta / D
+
+def IndexToDeclRa(index, nside,nest= False):
+    theta,phi=hp.pixelfunc.pix2ang(nside ,index,nest=nest)
+    return -np.degrees(theta-np.pi/2.),np.degrees(phi)
+
+
+def rotate_and_rebin(pix_, nside_maps, rot, delta_=0.0):
+    # per-rot settings
+    angle_by_rot = [0, 180, 90, 270]         # degrees
+    flip_by_rot  = [False, False, True, True]
+
+    ang = angle_by_rot[rot] + delta_
+    flip = flip_by_rot[rot]
+
+    rotu = hp.rotator.Rotator(rot=[ang, 0, 0], deg=True)
+
+    alpha, delta = hp.pix2ang(nside_maps*2, pix_)          # original angles
+    rot_alpha, rot_delta = rotu(alpha, delta)               # rotated
+
+    if flip:
+        rot_alpha = np.pi - rot_alpha                       # mirror in alpha
+
+    pix = hp.ang2pix(nside_maps*2, rot_alpha, rot_delta)    # back to pixels
+
+    dec__, ra__ = IndexToDeclRa(pix, nside_maps*2)
+    return convert_to_pix_coord(ra__, dec__, nside=nside_maps)
