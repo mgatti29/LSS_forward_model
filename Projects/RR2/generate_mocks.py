@@ -1,5 +1,9 @@
 import LSS_forward_model
-from LSS_forward_model.PKDGRAV_and_postprocessing_utilities import *
+from LSS_forward_model.cosmology import *
+from LSS_forward_model.lensing import *
+from LSS_forward_model.maps import *
+from LSS_forward_model.halos import *
+from LSS_forward_model.tsz import *
 import os
 import pandas as pd
 import numpy as np
@@ -10,14 +14,26 @@ import copy
 import glass
 import pyccl as ccl
 from mpi4py import MPI
+import BaryonForge as bfn
+
+
+
 
 def run(path_simulation,rot, noise_rel):
     
     SC_corrections = np.load('/global/homes/m/mgatti/LSS_forward_model/Data/SC_RR2_fit.npy',allow_pickle =True).item()
-    path_maps_gower = path_simulation+'/maps_Gower_{0}_{1}.npy'.format(rot,noise_rel)
+    
+    if baryonification:
+        label_baryonification = 'baryonified_{0}'.format(noise_rel)
+        path_maps_gower = path_simulation+'/maps_Gower_baryonified_{0}_{1}.npy'.format(rot,noise_rel)
+    else:
+        label_baryonification = 'normal'
+        path_maps_gower = path_simulation+'/maps_Gower_{0}_{1}.npy'.format(rot,noise_rel)
+    
+    #if True:
     if not os.path.exists(path_maps_gower):        
         # get basic info -------------------------------------------------------------
-        sims_parameters, cosmo_pyccl, camb_pars = read_sims_params(path_simulation)    
+        sims_parameters, cosmo_pyccl, camb_pars, colossus_pars = read_sims_params(path_simulation)    
         shells_info = recover_shell_info(path_simulation+'/z_values.txt', max_z=49)
     
     
@@ -33,11 +49,12 @@ def run(path_simulation,rot, noise_rel):
         sims_parameters['eta_IA'] = eta_IA
         sims_parameters['bias_sc'] = bias_sc
         sims_parameters['rot'] = rot
+        filename_new_baryonic_parameters = f"sys_baryo_{0}.npy".format(noise_rel)
         
     
         # load n(z) --------------------------------------------------------------------
         nz_file = fits.open('/pscratch/sd/m/mgatti/euclid/Reg2_SHE_tombins_unitweights_nz_SOMbin_C2020z.fits')
-        
+       
         nz = []
         redshift = np.linspace(0,6,3001)
         n_bins = 50
@@ -45,105 +62,80 @@ def run(path_simulation,rot, noise_rel):
         n_trim = bin_factor * n_bins 
         z_rebinned = redshift[:n_trim].reshape(n_bins, bin_factor).mean(axis=1)
         
-        nz_ = nz_file[1].data['N_Z'][0]+nz_file[1].data['N_Z'][1]+nz_file[1].data['N_Z'][2]+nz_file[1].data['N_Z'][3]+nz_file[1].data['N_Z'][4]+nz_file[1].data['N_Z'][5]
-        nz_rebinned = nz_[:n_trim].reshape(n_bins, bin_factor).sum(axis=1)
+        ############################################
+        nz_ = [nz_file[1].data['N_Z'][0]+nz_file[1].data['N_Z'][1]+nz_file[1].data['N_Z'][2]+nz_file[1].data['N_Z'][3]+nz_file[1].data['N_Z'][4]+nz_file[1].data['N_Z'][5]]
+        for i in range(6):
+            nz_.append(nz_file[1].data['N_Z'][i])
         
-        nz_shifted_on_rebinned = shift_nz(
-            z=z_rebinned,
-            nz=nz_rebinned,
-            z_rebinned=z_rebinned,
-            delta_z=dz[0],
-            renorm="source"  # keep the original integral
-        )
+        for ix in range(len(sims_parameters['dz'])):
+            nz_rebinned = nz_[ix][:n_trim].reshape(n_bins, bin_factor).sum(axis=1)
         
-        
-        norm = np.trapz(nz_rebinned,nz_shifted_on_rebinned)
-        nz.append(nz_shifted_on_rebinned/norm)
-        
-        for ix in [1,2,3,4,5,6]:
-            nz_ = nz_file[1].data['N_Z'][ix-1]
-            nz_rebinned = nz_[:n_trim].reshape(n_bins, bin_factor).sum(axis=1)
-        
+            # apply a shift in the mean ------
             nz_shifted_on_rebinned = shift_nz(
-                z=z_rebinned,
-                nz=nz_rebinned,
-                z_rebinned=z_rebinned,
-                delta_z=dz[ix],
-                renorm="source"  # keep the original integral
-            )
+                        z=z_rebinned,
+                        nz=nz_rebinned,
+                        z_rebinned=z_rebinned,
+                        delta_z=sims_parameters['dz'][ix],
+                        renorm="source"  # keep the original integral
+                    )
         
+            
             norm = np.trapz(nz_shifted_on_rebinned,z_rebinned)
             nz.append(nz_shifted_on_rebinned/norm)
         nz = np.array(nz)
         redshift = copy.deepcopy(z_rebinned)
         
-        
-        shells = []
-        steps = []
-        zeff_array = []
-        for row in range(len((shells_info["Step"][::-1]))):
-            step, zmin, zmax = shells_info["Step"][::-1][row], shells_info["z_near"][::-1][row], shells_info["z_far"][::-1][row]
-            za = np.linspace(zmin, zmax, 100)
-            wa = np.ones_like(za)
-            zeff = (zmin + zmax)/2
-            shells.append(glass.shells.RadialWindow(za, wa, zeff))
-            steps.append(int(step))
-            zeff_array.append(zeff)
-        ngal_glass  = np.array([glass.shells.partition(redshift, nz[i], shells) for i in range(nz.shape[0])])
+        shells, steps, zeff, ngal_glass = build_shell_windows_and_partitions(
+            shells_info=shells_info,
+            redshift=redshift,
+            nz=nz,
+            samples_per_shell=100,
+        )
+
+
+
+        # Density shells + baryonification ------------------------------------------------------------------------------------------------
+        try:
+            bpar, sys = load_or_draw_baryon_params(
+                path_sim=path_simulation,
+                specs=baryon_priors,
+                cache_filename=filename_new_baryonic_parameters,
+                base_params_path=base_params_path,
+                overrides=False,  # set to dict if you need overrides
+            )
+        except:
+            bpar, sys = load_or_draw_baryon_params(
+                path_sim=path_simulation,
+                specs=baryon_priors,
+                cache_filename=filename_new_baryonic_parameters,
+                base_params_path=base_params_path,
+                overrides=True,  # set to dict if you need overrides
+            )
+        if baryonification:
             
-        # halo catalog --------------------------------------------------------------------
-        if baryonification:
-            if not os.path.exists(path_simulation+ 'halo_catalog.parquet'):
-                save_halocatalog(shells_info, sims_parameters, max_redshift = max_redshift_halo_catalog, halo_snapshots_path = path_simulation, catalog_path = path_simulation + 'halo_catalog.parquet')
-    
-    
-        # baryonification -------------------------------------------------
-        if baryonification:
-        
             label_baryonification = 'baryonified'
-            # load into memory halocatalog
-            df = pd.read_parquet(path_simulation + 'halo_catalog.parquet', engine='pyarrow')
             
-            halos = dict()
-            halos['M'] =  recover_halo_mass(df)  
-            halos['z']  = recover_halo_redshift(df)  
-            halos['ra'], halos['dec']  = recover_halo_radec(df)
+            # create halo catalog --------------------------------------------
+            if not os.path.exists(path_simulation+ 'halo_catalog.parquet'):
+                print ('creating halo light cone')
+                save_halocatalog(shells_info, sims_parameters, max_redshift = max_redshift_halo_catalog, halo_snapshots_path = path_simulation, catalog_path = path_simulation + 'halo_catalog.parquet')
         
-            mask = np.log10(halos['M']) > halo_catalog_log10mass_cut
-            halos['M'] = halos['M'][mask]
-            halos['z'] = halos['z'][mask]
-            halos['ra'] = halos['ra'][mask]
-            halos['dec'] = halos['dec'][mask]
+            tsz_path = os.path.join(path_simulation, f"tsz_{nside_maps}.npy")
+            dens_path = os.path.join(path_simulation, f"density_b_{nside_maps}.npy")
+        
+            if (not os.path.exists(dens_path) or (do_tSZ and (not os.path.exists(tsz_path)))):
+                halos = load_halo_catalog(path_simulation+ 'halo_catalog.parquet',colossus_pars,sims_parameters,halo_catalog_log10mass_cut)
+        
             
-            bpar = np.load('../Data/Baryonification_default_parameters.npy',allow_pickle=True)
         
-            #save "baryonified" density shells --------------------------------------
-            if not os.path.exists(path_simulation + 'density_b_{0}.npy'.format(nside_maps)):
+                make_tsz_and_baryonified_density(path_simulation,sims_parameters,cosmo_pyccl,
+                                             halos,bpar,nside_maps,shells_info,dens_path,
+                                             tsz_path,do_tSZ,nside_baryonification,
+                                             halo_catalog_log10mass_cut)
         
-                density = []
-                for i,step in enumerate(shells_info['Step'][::-1]):
-                    min_z = shells_info['z_near'][::-1][i]
-                    if i == 0:
-                        min_z += 1e6
-                    max_z = shells_info['z_far'][::-1][i]
-                
-                 
-                    path = file + '/particles_{0}_4096.parquet'.format(int(step))
-                    counts = np.array(pd.read_parquet(path)).flatten()
-                    counts = counts.astype(np.float32)
-                    counts = hp.ud_grade(counts, nside_out=nside_baryonification, power=-2)
-                
-                    density_baryonified = baryonify_shell(halos, sims_parameters, counts, bpar, min_z, max_z, nside_baryonification)    
-                    density.append(hp.ud_grade(density_baryonified,nside_out = nside_maps))
-            
-                density = np.array(density)
-                np.save(path_simulation + 'density_b_{0}.npy'.format(nside_maps),density)
-            else:
-                density = np.load(path_simulation + 'density_b_{0}.npy'.format(nside_maps),allow_pickle=True)
-                
-                
+            density = np.load(dens_path,allow_pickle=True)
+        
         else:
-        
             label_baryonification = 'normal'
             #save "normal" density shells --------------------------------------
             if not os.path.exists(path_simulation+'/delta_{0}.npy'.format(nside_maps)):
@@ -151,55 +143,44 @@ def run(path_simulation,rot, noise_rel):
             else:
                 density = np.load(path_simulation+'/delta_{0}.npy'.format(nside_maps),allow_pickle=True)
         
+        print ('done')
+
         
-        # compute kappa & shear *********
-        if not os.path.exists(path_simulation+'/gamma_glass_{0}_{1}.npy'.format(nside_maps,label_baryonification)):
+        # compute kappa & shear *********************************************************************************************
+        # on the fly
+       
+        # Note: kappa field ill have the healpy pixel window function applied.
+        # however, glass, when it computes gamma, automatically deconvolves it; it will be added later when making mocks and putting simulated galaxies into pixels -- 
+        cosmo = Cosmology.from_camb(camb_pars)
+        gamma_ = []
         
-            # Note: kappa field ill have the healpy pixel window function applied.
-            # however, glass, when it computes gamma, automatically deconvolves it; it will be added later when making mocks and putting simulated galaxies into pixels -- 
-            
-            cosmo = Cosmology.from_camb(camb_pars)
-            kappa_ = []
-            gamma_ = []
-            IA_shear_ = []
-            
-            convergence = glass.lensing.MultiPlaneConvergence(cosmo)
-            for ss in frogress.bar(range(len(density))):
-               
-                convergence.add_window(density[ss], shells[ss])
-                # get convergence field
-                kappa = copy.deepcopy(convergence.kappa)
-                gamma = glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True)
-                IA_shear = glass.lensing.from_convergence(density[ss]-np.mean(density[ss]), lmax=nside_maps*3-1, shear=True)
-               
-                
-                kappa_.append(kappa)
-                gamma_.append(gamma)
-                IA_shear_.append(IA_shear)
-         
-            
-            kappa_ = np.array(kappa_)
-            gamma_ = np.array(gamma_)
-            IA_shear = np.array(IA_shear)
-            np.save(path_simulation+'/kappa_glass_{0}_{1}.npy'.format(nside_maps,label_baryonification),kappa_)
-            np.save(path_simulation+'/gamma_glass_{0}_{1}.npy'.format(nside_maps,label_baryonification),gamma_)
-            np.save(path_simulation+'/IA_shear_glass_{0}_{1}.npy'.format(nside_maps,label_baryonification),IA_shear)
-        else:
-            kappa_ = np.load(path_simulation+'/kappa_glass_{0}_{1}.npy'.format(nside_maps,label_baryonification),allow_pickle=True)
-            gamma_ = np.load(path_simulation+'/gamma_glass_{0}_{1}.npy'.format(nside_maps,label_baryonification),allow_pickle=True)
-            IA_shear_ = np.load(path_simulation+'/IA_shear_glass_{0}_{1}.npy'.format(nside_maps,label_baryonification),allow_pickle=True)
+        convergence = glass.lensing.MultiPlaneConvergence(cosmo)
+        for ss in frogress.bar(range(len(density))):
+           
+            convergence.add_window(density[ss], shells[ss])
+            # get convergence field
+            kappa = copy.deepcopy(convergence.kappa)
+            gamma = glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True)
+            gamma_.append(gamma)
+                 
+        gamma_ = np.array(gamma_)
+
+
+        cosmo = Cosmology.from_camb(camb_pars)
+        IA_shear_ = []
         
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+        convergence = glass.lensing.MultiPlaneConvergence(cosmo)
+        for ss in frogress.bar(range(len(density))):
+            # get convergence field
+            IA_shear = glass.lensing.from_convergence(density[ss]-np.mean(density[ss]), lmax=nside_maps*3-1, shear=True)
+            IA_shear_.append(IA_shear)
+     
+        IA_shear_ = np.array(IA_shear_)
+ 
+
+
+        
+        # Do maps ****************************************************************************************************************
         corr_variance_array =  [  SC_corrections['corr_variance_fit'][tomo](bias_sc[tomo])       for tomo in range(nz.shape[0])]
         coeff_kurtosis_array = [  SC_corrections['coeff_kurtosis_fit'][tomo](bias_sc[tomo])       for tomo in range(nz.shape[0])]
         A_corr_array = [  SC_corrections['A_corr_fit'][tomo](bias_sc[tomo])       for tomo in range(nz.shape[0])]
@@ -216,7 +197,7 @@ def run(path_simulation,rot, noise_rel):
         # load each lightcone output in turn and add it to the simulation
         # note: I added a -sign to gamma to match data conventions later
         for tomo in range(nz.shape[0]):
-            for i in (range(len(kappa_))):       
+            for i in (range(len(gamma_))):       
                 C1 = 5e-14
                 rho_crit0_h2 = ccl.physical_constants.RHO_CRITICAL
                 rho_c1 = C1 * rho_crit0_h2
@@ -337,12 +318,7 @@ def run(path_simulation,rot, noise_rel):
     
         maps_Gower['sims_parameters'] = sims_parameters
         np.save(path_maps_gower,maps_Gower)
-        
-        
-        #maps_Gower[tomo] =     {'g1_map':g1_map,'g2_map':g2_map,'e1':e1_,'e2':e2_,'e1n':e1n_,'e2n':e2n_,
-        #                        'e1r_map0_ref':e1r_map0_ref,
-        #                        'e2r_map0_ref':e2r_map0_ref,
-        #                        'var_':var_}
+    
 
         '''
         # make a catalog ---------------------------------------------------------------------------------------------------------------------------------
@@ -356,15 +332,13 @@ def run(path_simulation,rot, noise_rel):
         '''
 
 
-'''
-Add rotation
-
-'''
 
 if __name__ == '__main__':
 
 
     # nuisance_parameters -----------------------------------------------------
+    do_maps = True
+    
     dz_mean = [0,0,0,0,0,0,0]
     dz_spread = [0.01,0.01,0.01,0.01,0.01,0.01,0.01]
     
@@ -377,18 +351,40 @@ if __name__ == '__main__':
     bias_SC_interval = [0.5,1.5]
     
     # Baryonification settings ------------------------------------------------
-    baryonification = False
+    
+    baryonification = True
+    do_tSZ = True
     nside_baryonification = 1024
     max_redshift_halo_catalog = 1.5
-    halo_catalog_log10mass_cut = 12.5
-    
+    halo_catalog_log10mass_cut = 13.5
+    base_params_path = "../../Data/Baryonification_wl_tsz_flamingo_parameters.npy"
+    baryon_priors =   {"M_c": (12.5, 15.5, "lin"), 
+                      "theta_ej": (3.0, 10.0, "lin"),
+                       "eta": (-2.0, -0.1, "log10")} 
+
     # general maps -------------------------------------------------------------
     nside_maps = 1024
     tomo_bins = [1,2,3,4,5,6]
     delta_rot = 0.
 
+    '''
+    dz_mean = [0,0,0,0,0,0,0]
+    dz_spread = [0,0,0,0,0,0,0]
+    
+    dm_mean = [1,1,1,1,1,1,1]
+    dm_spread = [0,0,0,0,0,0,0]
+    
+    A0_interval  = [0,0]
+    eta_interval = [0,0]
+    
+    bias_SC_interval = [1,1]
+    path_simulation = '/pscratch/sd/m/mgatti/highres_SBI/Flagship_covariance_big/4_big/'
+    rot = 0
+    noise_rel = 0
+    run(path_simulation, rot, noise_rel)
+    '''
 
-
+  
     from pathlib import Path
     BASE = Path("/pscratch/sd/m/mgatti/highres_SBI/runsU")
     TARGET = "particles_100_4096.parquet"
@@ -396,55 +392,46 @@ if __name__ == '__main__':
     missing = sorted(set(BASE.glob("run*/")) - set(have))
 
     runs = []
-    for rot in [0]:
+    for rot in [0,1,2,3]:
         for noise_rel in [0]:
             for path in have:
-                path_maps_gower = str(path)+'maps_Gower_{0}_{1}A.npy'.format(rot,noise_rel)
+                if baryonification:
+                    label_baryonification = 'baryonified_{0}'.format(noise_rel)
+                    path_maps_gower = str(path)+'/maps_Gower_baryonified_{0}_{1}.npy'.format(rot,noise_rel)
+                else:
+                    label_baryonification = 'normal'
+                    path_maps_gower = str(path)+'/maps_Gower_{0}_{1}.npy'.format(rot,noise_rel)
                 if not os.path.exists(path_maps_gower):
-                    runs.append([str(path),rot,noise_rel])
+                    runs.append([str(path)+'/',rot,noise_rel])
 
-    print (len(runs))
+
 
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     rank = comm.Get_rank()
 
     # Start with run_count = 0, but each process handles tasks based on rank
-    run_count = rank
+    run_count = rank 
 
     while run_count < len(runs):
-        try:
-            run(runs[run_count][0], runs[run_count][1], runs[run_count][2])
-        except:
-            pass
+       
+        print (runs[run_count][0])
+#try:
+        run(runs[run_count][0], runs[run_count][1], runs[run_count][2])
+       # except:
+       #     print ('failed ',runs[run_count][0])
+            
         run_count += size
     comm.Barrier()
 
-#path_simulation = '/pscratch/sd/m/mgatti/highres_SBI/runsU/run002/'
-#rot = 0
-#noise_rel = 0
-#run(path_simulation,tomo_bins, rot, noise_rel)
 
 
 
 
-# Flagship_default --------------------------------------------------------
-'''
-dz_mean = [0,0,0,0,0,0,0]
-dz_spread = [0,0,0,0,0,0,0]
+# do_maps = False 
+#module load python; source activate pyccl_env;  python  generate_mocks.py
+#module load python; source activate pyccl_env; srun --nodes=4 --tasks-per-node=8 python  generate_mocks.py
+# do_maps = True
+#module load python; source activate pyccl_env; srun --nodes=4 --tasks-per-node=24 python  generate_mocks.py
 
-dm_mean = [0,0,0,0,0,0,0]
-dm_spread = [0,0,0,0,0,0,0]
-
-A0_interval  = [0,0]
-eta_interval = [0,0]
-
-bias_SC_interval = [1,1]
-path_simulation = '/pscratch/sd/m/mgatti/highres_SBI/Flagship_covariance_big/4_big/'
-rot = 0
-noise_rel = 0
-run(path_simulation,tomo_bins, rot, noise_rel)
-'''
-
-#module load python; source activate pyccl_env; srun --nodes=4 --tasks-per-node=16 python  generate_mocks.py
 #salloc --nodes 4 --qos interactive --time 04:00:00 --constraint cpu  --account=m5099
