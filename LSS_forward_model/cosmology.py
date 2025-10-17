@@ -163,7 +163,6 @@ def recover_shell_info(path_z_file, max_z=49.0):
 
     for k in ['Step', 'z_far', 'z_near', 'delta_z', 'cmd_far', 'cmd_near', 'delta_cmd']:
         res[k] = res[k][init:]
-    res['Step'] = res['Step'] - res['Step'][0]
 
     # edges and means
     res['z_edges'] = np.hstack([res['z_far'][0], res['z_near']])
@@ -235,7 +234,7 @@ def read_sims_params(path):
     values = {}
     with open(f"{path}/control.par", "r") as f:
         for line in f:
-            if any(k in line for k in ('dNormalization', 'dSpectral', 'dBoxSize')):
+            if any(k in line for k in ('dNormalization', 'dSpectral', 'dBoxSize', 'dRedFrom','nSideHealpix')):
                 key = line.split('=')[0].strip()
                 val = line.split('=')[1].split('#')[0].strip()
                 values[key] = float(val)
@@ -243,6 +242,9 @@ def read_sims_params(path):
     As       = float(values['dNormalization'])
     n_s      = float(values['dSpectral'])
     dBoxSize = float(values['dBoxSize'])
+    max_z    = float(values['dRedFrom'])
+    nSideHealpix = int(values['nSideHealpix'])
+
 
     # ---- compute sigma8 from CAMB
     sigma_8 = As_to_sigma8_CAMB(Omega_m, Omega_b, h_dimless, n_s, w0, wa, m_nu, As)
@@ -261,6 +263,8 @@ def read_sims_params(path):
         'sigma_8': sigma_8,                 # scalar
         'm_nu': m_nu,                       # eV
         'dBoxSize Mpc/h': dBoxSize,         # comoving
+        'max_z':max_z,
+        'nSideHealpix':nSideHealpix,
     }
 
     # ---- CCL cosmology
