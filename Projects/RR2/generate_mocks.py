@@ -119,7 +119,8 @@ def run(path_simulation,rot, noise_rel):
             if not os.path.exists(path_simulation+ 'halo_catalog.parquet'):
                 print ('creating halo light cone')
                 save_halocatalog(shells_info, sims_parameters, max_redshift = max_redshift_halo_catalog, halo_snapshots_path = path_simulation, catalog_path = path_simulation + 'halo_catalog.parquet')
-        
+
+
             tsz_path = os.path.join(path_simulation, f"tsz_{nside_maps}.npy")
             dens_path = os.path.join(path_simulation, f"density_b_{nside_maps}.npy")
         
@@ -129,21 +130,21 @@ def run(path_simulation,rot, noise_rel):
             
         
                 make_tsz_and_baryonified_density(path_simulation,sims_parameters,cosmo_pyccl,
-                                             halos,bpar,nside_maps,shells_info,dens_path,
-                                             tsz_path,do_tSZ,nside_baryonification,
-                                             halo_catalog_log10mass_cut)
+                                     halos,bpar,nside_maps,shells_info,dens_path,
+                                     tsz_path,do_tSZ,shells,camb_pars,
+                                     halo_catalog_log10mass_cut)
         
             density = np.load(dens_path,allow_pickle=True)
         
         else:
             label_baryonification = 'normal'
             #save "normal" density shells --------------------------------------
-            if not os.path.exists(path_simulation+'/delta_{0}.npy'.format(nside_maps)):
-                density = make_density_maps(shells_info,path_simulation,path_simulation+'/delta_{0}.npy'.format(nside_maps),nside_maps)
+            if not os.path.exists(path_simulation+'/density_{0}.npy'.format(nside_maps)):
+                density = make_density_maps(shells_info,path_simulation,path_simulation+'/delta_{0}.npy'.format(nside_maps),nside_maps,shells,camb_pars)
             else:
-                density = np.load(path_simulation+'/delta_{0}.npy'.format(nside_maps),allow_pickle=True)
+                density = np.load(path_simulation+'/density_{0}.npy'.format(nside_maps),allow_pickle=True)
         
-        print ('done')
+        print ('done density')
 
         
         # compute kappa & shear *********************************************************************************************
@@ -151,6 +152,7 @@ def run(path_simulation,rot, noise_rel):
        
         # Note: kappa field ill have the healpy pixel window function applied.
         # however, glass, when it computes gamma, automatically deconvolves it; it will be added later when making mocks and putting simulated galaxies into pixels -- 
+        print ('doing lensing')
         cosmo = Cosmology.from_camb(camb_pars)
         gamma_ = []
         
@@ -179,7 +181,7 @@ def run(path_simulation,rot, noise_rel):
  
 
 
-        
+        print ('making mocks')
         # Do maps ****************************************************************************************************************
         corr_variance_array =  [  SC_corrections['corr_variance_fit'][tomo](bias_sc[tomo])       for tomo in range(nz.shape[0])]
         coeff_kurtosis_array = [  SC_corrections['coeff_kurtosis_fit'][tomo](bias_sc[tomo])       for tomo in range(nz.shape[0])]
@@ -201,7 +203,7 @@ def run(path_simulation,rot, noise_rel):
                 C1 = 5e-14
                 rho_crit0_h2 = ccl.physical_constants.RHO_CRITICAL
                 rho_c1 = C1 * rho_crit0_h2
-                IA_f = F_nla(z=zeff_array[i],
+                IA_f = F_nla(z=zeff[i],
                  om0=sims_parameters['Omega_m'],
                  A_ia=A_IA, rho_c1=rho_c1, eta=eta_IA, z0=0.67,
                  cosmo=cosmo_pyccl)
@@ -287,7 +289,7 @@ def run(path_simulation,rot, noise_rel):
             var_ =  e1r_map0_ref**2+e2r_map0_ref**2
         
         
-            #'''
+     
             e1r_map   *= 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
             e2r_map   *= 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
             e1r_map0  *= 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
@@ -297,7 +299,7 @@ def run(path_simulation,rot, noise_rel):
         
             
             
-            #'''
+        
             g1_map[unique_pix] += np.bincount(idx_rep, weights= g1_*cats_Euclid[tomo]['w'])
             g2_map[unique_pix] += np.bincount(idx_rep, weights= g2_*cats_Euclid[tomo]['w'])
         
@@ -320,16 +322,14 @@ def run(path_simulation,rot, noise_rel):
         np.save(path_maps_gower,maps_Gower)
     
 
-        '''
+   
         # make a catalog ---------------------------------------------------------------------------------------------------------------------------------
-        SC_per_pixel_correction_noise  = f**2/((np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_)))[pix]
+        #SC_per_pixel_correction_noise  = f**2/((np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_)))[pix]
         
         # the f**2 applied to g1,g2 is the normalisation missing in the g1_tot,g2_tot ---------------------------------------------------
-        e1_SC = g1_*f**2+es1a*SC_per_pixel_correction_noise
-        e2_SC = g2_*f**2+es2a*SC_per_pixel_correction_noise
-        #e1_SC,e2_SC = addSourceEllipticity({'shear1':g1_,'shear2':g2_},{'e1':es1a*SC_per_pixel_correction_noise,'e2':es2a*SC_per_pixel_correction_noise},es_colnames=("e1","e2"))
-        cats_Gower[tomo] =  {'ra':cats_Euclid[tomo]['ra'],'dec':cats_Euclid[tomo]['dec'],'e1':e1_SC,'e2':e2_SC,'w':cats_Euclid[tomo]['w']}
-        '''
+        #e1_SC = g1_*f**2+es1a*SC_per_pixel_correction_noise
+        #e2_SC = g2_*f**2+es2a*SC_per_pixel_correction_noise
+        #cats_Gower[tomo] =  {'ra':cats_Euclid[tomo]['ra'],'dec':cats_Euclid[tomo]['dec'],'e1':e1_SC,'e2':e2_SC,'w':cats_Euclid[tomo]['w']}
 
 
 
@@ -354,7 +354,6 @@ if __name__ == '__main__':
     
     baryonification = True
     do_tSZ = True
-    nside_baryonification = 1024
     max_redshift_halo_catalog = 1.5
     halo_catalog_log10mass_cut = 13.5
     base_params_path = "../../Data/Baryonification_wl_tsz_flamingo_parameters.npy"
@@ -386,13 +385,14 @@ if __name__ == '__main__':
 
   
     from pathlib import Path
-    BASE = Path("/pscratch/sd/m/mgatti/highres_SBI/runsU")
+    BASE = Path("/pscratch/sd/m/mgatti/highres_SBI/runsV")
     TARGET = "particles_100_4096.parquet"
     have = sorted(p for p in BASE.glob("run*/") if (p / TARGET).is_file())
     missing = sorted(set(BASE.glob("run*/")) - set(have))
 
+    done = 0 
     runs = []
-    for rot in [0,1,2,3]:
+    for rot in [0]:#,1,2,3]:
         for noise_rel in [0]:
             for path in have:
                 if baryonification:
@@ -402,10 +402,14 @@ if __name__ == '__main__':
                     label_baryonification = 'normal'
                     path_maps_gower = str(path)+'/maps_Gower_{0}_{1}.npy'.format(rot,noise_rel)
                 if not os.path.exists(path_maps_gower):
-                    runs.append([str(path)+'/',rot,noise_rel])
+                    if not os.path.exists(str(path)+ '/halo_catalog.parquet'):
+                        runs.append([str(path)+'/',rot,noise_rel])
+                    else:
+                        done +=1
 
 
 
+    print (len(runs),done)
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     rank = comm.Get_rank()
@@ -414,13 +418,7 @@ if __name__ == '__main__':
     run_count = rank 
 
     while run_count < len(runs):
-       
-        print (runs[run_count][0])
-#try:
         run(runs[run_count][0], runs[run_count][1], runs[run_count][2])
-       # except:
-       #     print ('failed ',runs[run_count][0])
-            
         run_count += size
     comm.Barrier()
 
@@ -430,7 +428,7 @@ if __name__ == '__main__':
 
 # do_maps = False 
 #module load python; source activate pyccl_env;  python  generate_mocks.py
-#module load python; source activate pyccl_env; srun --nodes=4 --tasks-per-node=8 python  generate_mocks.py
+#module load python; source activate pyccl_env; srun --nodes=4 --tasks-per-node=2 python  generate_mocks.py
 # do_maps = True
 #module load python; source activate pyccl_env; srun --nodes=4 --tasks-per-node=24 python  generate_mocks.py
 

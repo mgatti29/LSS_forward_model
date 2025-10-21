@@ -8,7 +8,7 @@ import glob
 import pandas as pd
 import pyarrow.parquet as pq
 import frogress
-
+import astropy.units as u
 
 def build_z_values_file(directory, out_name, out_dir, sims_parameters=None):
     """

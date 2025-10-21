@@ -7,8 +7,7 @@ import healpy as hp
 import frogress
 import pyccl as ccl
 import pandas as pd
-# `colossus` is imported inside infer_overdensity_from_fof to keep it optional
-
+from .maps import add_shells
 
 def mu(c):
     """
@@ -301,7 +300,8 @@ def make_tsz_and_baryonified_density(
     dens_path: str,
     tsz_path: str,
     do_tSZ: bool,
-    nside_baryonification: int = 1024,
+    shells,
+    camb_pars,
     min_mass: float = 13,                      # Msun/h threshold after FoF->SO
     njobs: int = 16,
 ):
@@ -364,6 +364,7 @@ def make_tsz_and_baryonified_density(
         z_near = shells_info["z_near"][::-1]
         z_far = shells_info["z_far"][::-1]
 
+        missing_shells = []
         for i in frogress.bar(range(len(steps))):
             try:
                 step = steps[i]
@@ -394,8 +395,10 @@ def make_tsz_and_baryonified_density(
                 counts = np.array(pd.read_parquet(part_path)).astype(np.float32).ravel()
     
                 # counts are scalar fields; for resolution change use power=0
-                counts = hp.ud_grade(counts, nside_out=nside_baryonification, power=0)
-    
+                nside_original = hp.npix2nside(counts.size) 
+                alm = hp.map2alm(counts,lmax = nside_maps*2)
+                counts = hp.alm2map(alm,nside= nside_maps,pixwin=True)*(nside_original/nside_maps)**2
+                      
                 mask_z = (halos["z"] > zmin) & (halos["z"] < zmax)
     
                 cdict = {
@@ -418,9 +421,17 @@ def make_tsz_and_baryonified_density(
                     density_b = (baryonified_shell / np.mean(baryonified_shell)) - 1.0
                 else:
                     density_b = 0.0 * baryonified_shell
-    
-                density.append(hp.ud_grade(density_b, nside_out=nside_maps, power=0))
+                density.append(density_b)
             except:
-                pass
+                missing_shells.append(i)
+                
+        if len(missing_shells)>0:
+            missing_shells = [shells[int(i)] for i in missing_shells]
+            density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
+    
+            for d in density_to_be_added:
+                delta.append(d)   
         density = np.asarray(density, dtype=np.float32)
         np.save(dens_path, density)
+
+

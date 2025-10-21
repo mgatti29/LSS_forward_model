@@ -8,10 +8,85 @@ import pyccl as ccl
 import frogress
 import os
 from typing import Dict, Mapping, Iterable, Optional, Tuple
-
+import camb
 
 
 ParamSpec = Iterable[float]  # (low, high, scale)
+
+def add_shells(camb_pars,nside_maps = 1024,missing_shells = None):
+
+    """
+    Build CAMB source windows from the given shells, compute their C_ell,
+    discretize for HEALPix, and draw ONE correlated realization:
+    returns a list of length N (one map per shell).
+
+    Parameters
+    ----------
+    camb_pars : camb.CAMBparams
+        A configured CAMB parameter object (will not be mutated).
+    nside_maps : int
+        HEALPix Nside for the output maps.
+    missing_shells : sequence of (z, W, _)
+        Each entry provides the redshift grid and weights for one shell.
+
+    Notes
+    -----
+    - GLASS expects Cls in *upper-triangle* order:
+      (W1xW1, W1xW2, ..., W1xWn, W2xW2, ..., WnxWn).
+    - For scalar (spin-0) number-counts fields, keep *all* correlations:
+      don't pass `ncorr` to `discretized_cls`/`generate` unless you want to
+      intentionally limit correlations to save memory.
+    """
+    
+    lmax = nside_maps*2
+    limber=True
+    limber_lmin=100
+    pars = camb_pars
+    
+    # set up parameters for angular power spectra
+    pars.WantTransfer = True
+    pars.WantCls = True
+    pars.Want_CMB = True
+    #pars.min_l = 1
+    pars.set_for_lmax(lmax)
+    
+    # set up parameters to only compute the intrinsic matter cls
+    pars.SourceTerms.limber_windows = limber
+    pars.SourceTerms.limber_phi_lmin = limber_lmin
+    pars.SourceTerms.counts_density = True
+    pars.SourceTerms.counts_redshift = False
+    pars.SourceTerms.counts_lensing = False
+    pars.SourceTerms.counts_velocity = False
+    pars.SourceTerms.counts_radial = False
+    pars.SourceTerms.counts_timedelay = False
+    pars.SourceTerms.counts_ISW = False
+    pars.SourceTerms.counts_potential = False
+    pars.SourceTerms.counts_evolve = False
+    
+    sources = []
+    for za, wa, _ in missing_shells:
+        s = camb.sources.SplinedSourceWindow(z=za, W=wa)
+        sources.append(s)
+    pars.SourceWindows = sources
+    
+    
+    n = len(sources)
+    cls_ = camb.get_results(pars).get_source_cls_dict(lmax=lmax, raw_cl=True)
+    
+    for i in range(1, n+1):
+        if np.any(cls_[f'W{i}xW{i}'] < 0):
+            warnings.warn('negative auto-correlation in shell {i}; improve accuracy?')
+    
+    cc =  [cls_[f'W{i}xW{j}'] for i in range(1, n+1) for j in range(i, 0, -1)]
+    
+    cls = glass.discretized_cls(cc, nside=nside_maps, lmax=lmax, ncorr=3)
+    fields = glass.gaussian_fields(missing_shells)
+    
+    matter = glass.generate(fields, cls, nside_maps, ncorr=3)
+    maps = list(matter)        # length 15, one HEALPix map per shell
+    return maps
+
+
 
 def draw_baryon_params(
     specs: Mapping[str, ParamSpec],
@@ -174,7 +249,7 @@ def baryonify_shell(halos, sims_parameters, counts, bpar, min_z, max_z, nside):
     return density_baryonified
 
 
-def make_density_maps(shells_info,path_simulation,path_output,nside_maps):
+def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,camb_pars):
     """
     Generate or load downgraded Healpy maps of the density contrast for each simulation shell.
 
@@ -186,7 +261,7 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps):
     Parameters
     ----------
     shells_info : dict
-        Dictionary containing metadata for each shell, including a 'Step' key that holds 
+        Dictionary containing metadata for each shell, including a . Step' key that holds 
         the list of simulation timesteps (should be sortable as integers).
     path_simulation : str
         Path to the directory containing the simulation outputs, where each file is named 
@@ -197,29 +272,44 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps):
     Returns
     -------
     delta : np.ndarray
-        Array of downgraded Healpy maps of the density contrast for each shell. Shape is 
+   .     Array of downgraded Healpy maps of the density contrast for each shell. Shape is 
         (number_of_shells, 12 * nside_maps**2).
     """
 
     delta= []
+    missing_shells = []
     for iii in frogress.bar(range(len(shells_info['Step']))):
         try:
             step = shells_info['Step'][::-1][iii]
             path = path_simulation + '/particles_{0}_4096.parquet'.format(int(step))
             counts = np.array(pd.read_parquet(path)).flatten()
+
+            nside_original = hp.npix2nside(counts.size) 
+            
             if np.sum(counts) == 0:
-                delta.append(hp.ud_grade(counts*1.0,nside_out=1024))
+                delta.append(hp.ud_grade(counts*1.0,nside_out=nside_maps))
             else:
-                d = counts/np.mean(counts)-1
-                delta.append(hp.ud_grade(d,nside_out=1024))
+                if nside_maps != nside_original:
+                    d = counts/np.mean(counts)-1
+                    alm = hp.map2alm(d,lmax = nside_maps*2)
+                    d_filtered = hp.alm2map(alm,nside= nside_maps,pixwin=True)
+                    delta.append(d_filtered)
+                else:
+                    d = counts/np.mean(counts)-1
+                    delta.append(d)
         except:
-            pass
+            missing_shells.append(step)
+
+    # Add missing shells --------------------
+    if len(missing_shells)>0:
+        missing_shells = [shells[int(i)] for i in missing_shells]
+        density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
+
+        for d in density_to_be_added:
+            delta.append(d)  
     delta = np.array(delta)
     np.save(path_output,delta)
     return delta
-
- 
-
 
 def convert_to_pix_coord(ra, dec, nside=1024):
     """
