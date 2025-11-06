@@ -5,6 +5,7 @@ from copy import deepcopy
 from scipy.interpolate import RegularGridInterpolator
 import warnings
 import frogress
+import copy
 
 warnings.filterwarnings(
     "ignore",
@@ -55,7 +56,7 @@ class LimberTheory:
         camb.set_feedback_level(feedback)
 
         # --- CAMB results (do not mutate user's params) ---
-        self._pars_lin = deepcopy(pars)
+        self._pars_lin = copy.copy(pars)
         self._pars_lin.NonLinear = model.NonLinear_none
         self.results = camb.get_results(self._pars_lin)
 
@@ -83,7 +84,7 @@ class LimberTheory:
             var1=model.Transfer_tot, var2=model.Transfer_tot
         )
         # MEAD fallback (robust)
-        self._pars_mead = deepcopy(pars)
+        self._pars_mead = copy.copy(pars)
         self._pars_mead.NonLinear = model.NonLinear_both
         self._pars_mead.NonLinearModel.set_params(halofit_version="mead")
         self._pk_mead = camb.get_matter_power_interpolator(
@@ -94,7 +95,7 @@ class LimberTheory:
         # optional halofit
         self._pk_halofit = None
         if self.nonlinear_req == "halofit":
-            self._pars_halofit = deepcopy(pars)
+            self._pars_halofit = copy.copy(pars)
             self._pars_halofit.NonLinear = model.NonLinear_both
             self._pars_halofit.NonLinearModel.set_params(halofit_version="takahashi")
             self._pk_halofit = camb.get_matter_power_interpolator(
@@ -108,6 +109,7 @@ class LimberTheory:
         if self._use_emu:
             try:
                 _ = ee2.get_boost(self._emu_params, 0.5, np.asarray([0.1]))
+                print ('using euclid emu')
             except Exception:
                 self._use_emu = False  # cosmology out of domain
         self._emu_interp = None         # RegularGridInterpolator for boost(z,k)

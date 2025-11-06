@@ -5,7 +5,8 @@ import camb
 from camb import model
 import h5py as h5
 import pyccl as ccl
-
+from astropy.cosmology import wCDM, Flatw0waCDM
+import scipy
 
 def As_to_sigma8_CAMB(Omega_m, Omega_b, h, n_s, w0, wa, m_nu, As):
     """
@@ -265,19 +266,10 @@ def read_sims_params(path):
         'dBoxSize Mpc/h': dBoxSize,         # comoving
         'max_z':max_z,
         'nSideHealpix':nSideHealpix,
+        'n_nu':3,
     }
 
-    # ---- CCL cosmology
-    cosmo_pyccl = ccl.Cosmology(
-        Omega_c=sims_parameters['Omega_cdm'],
-        Omega_b=sims_parameters['Omega_b'],
-        h=sims_parameters['h'],
-        sigma8=sims_parameters['sigma_8'],
-        n_s=sims_parameters['n_s'],
-        m_nu=[sims_parameters['m_nu']/3.0]*3,  # equal split
-        mass_split='equal',
-        matter_power_spectrum='linear',
-    )
+
 
     # ---- CAMB params (matching above)
     pars_camb = camb.CAMBparams()
@@ -293,6 +285,19 @@ def read_sims_params(path):
     pars_camb.DoLensing = False
     pars_camb.WantTransfer = True
 
+
+    # ---- CCL cosmology
+    cosmo_pyccl = ccl.Cosmology(
+        Omega_c=sims_parameters['Omega_cdm'],
+        Omega_b=sims_parameters['Omega_b'],
+        h=sims_parameters['h'],
+        sigma8=sims_parameters['sigma_8'],
+        n_s=sims_parameters['n_s'],
+        m_nu=[sims_parameters['m_nu']/3.0]*3,  # equal split
+        mass_split='equal',
+        matter_power_spectrum='linear',
+    )
+    
     # ---- Colossus-friendly dict (no Colossus import here)
     colossus_params = {
         'flat': True,
@@ -305,4 +310,180 @@ def read_sims_params(path):
         'wa': sims_parameters['wa'],
     }
 
-    return sims_parameters, cosmo_pyccl, pars_camb, colossus_params
+    if abs(sims_parameters['wa']) > 0:
+         cosmo_astropy = Flatw0waCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], wa=sims_parameters['wa']) 
+    else:
+        cosmo_astropy = wCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], Ode0=1-sims_parameters['Omega_m'])
+
+    
+    
+
+    cosmo_bundle = {'cosmo_pyccl':cosmo_pyccl,
+                    'pars_camb':pars_camb,
+                    'colossus_params':colossus_params,
+                    'cosmo_astropy':cosmo_astropy}
+
+    
+    return sims_parameters, cosmo_bundle
+
+
+def make_cosmo_bundle(sims_parameters):
+    # ---- CAMB params (matching above)
+    pars_camb = camb.CAMBparams()
+    pars_camb.set_cosmology(H0=sims_parameters['h']*100,
+                            ombh2=sims_parameters['Omega_b']*sims_parameters['h']**2,
+                            omch2=sims_parameters['Omega_cdm']*sims_parameters['h']**2,
+                            mnu=sims_parameters['m_nu'],
+                            tau=0.06, num_massive_neutrinos=sims_parameters['n_nu'])
+    pars_camb.InitPower.set_params(As=sims_parameters['As'], ns=sims_parameters['n_s'])
+    pars_camb.set_dark_energy(w=sims_parameters['w0'], wa=sims_parameters['wa'], dark_energy_model='ppf')
+    pars_camb.NonLinear = model.NonLinear_both
+    pars_camb.WantCls = False
+    pars_camb.DoLensing = False
+    pars_camb.WantTransfer = True
+
+
+    # ---- CCL cosmology
+    cosmo_pyccl = ccl.Cosmology(
+        Omega_c=sims_parameters['Omega_cdm'],
+        Omega_b=sims_parameters['Omega_b'],
+        h=sims_parameters['h'],
+        sigma8=sims_parameters['sigma_8'],
+        n_s=sims_parameters['n_s'],
+        m_nu=[sims_parameters['m_nu']/sims_parameters['n_nu']]*sims_parameters['n_nu'],  # equal split
+        mass_split='equal',
+        matter_power_spectrum='linear',
+    )
+    
+    # ---- Colossus-friendly dict (no Colossus import here)
+    colossus_params = {
+        'flat': True,
+        'H0': sims_parameters['h']*100.0,
+        'Om0': sims_parameters['Omega_m'],
+        'Ob0': sims_parameters['Omega_b'],
+        'sigma8': sims_parameters['sigma_8'],
+        'ns': sims_parameters['n_s'],
+        'w0': sims_parameters['w0'],
+        'wa': sims_parameters['wa'],
+    }
+
+    if abs(sims_parameters['wa']) > 0:
+         cosmo_astropy = Flatw0waCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], wa=sims_parameters['wa']) 
+    else:
+        cosmo_astropy = wCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], Ode0=1-sims_parameters['Omega_m'])
+
+    
+
+    cosmo_bundle = {'cosmo_pyccl':cosmo_pyccl,
+                    'pars_camb':pars_camb,
+                    'colossus_params':colossus_params,
+                    'cosmo_astropy':cosmo_astropy}
+
+
+
+    return cosmo_bundle
+
+
+def distance_to_redshit(d,cosmo_bundle):
+    z_hr = np.linspace(0, 10, 10001)
+    d_hr = cosmo_bundle['cosmo_astropy'].comoving_distance(z_hr).value 
+    interpolated_distance_to_redshift = scipy.interpolate.CubicSpline(d_hr,z_hr)
+    return interpolated_distance_to_redshift(d)
+
+def redshift_to_distance(z,cosmo_bundle):
+    return cosmo_bundle['cosmo_astropy'].comoving_distance(z).value 
+
+def make_shells_info_from_edges(z_edges, comoving_edges):
+    """
+    Build a dictionary describing simulation shells, ordered from far to near.
+
+    Parameters
+    ----------
+    z_edges : array-like
+        Redshift edges (in increasing order, near → far).
+    comoving_edges : array-like
+        Corresponding comoving distance edges (same order as z_edges).
+
+    Returns
+    -------
+    shells_info : dict
+        Dictionary with step index, z/cmd limits, widths, and mean redshift.
+    """
+    # Ensure monotonicity
+    assert np.all(np.diff(z_edges) > 0), "z_edges must be increasing (near→far)"
+    assert np.all(np.diff(comoving_edges) > 0), "comoving_edges must be increasing (near→far)"
+
+    # Reverse to go from far → near
+    z_rev = z_edges[::-1]
+    cmd_rev = comoving_edges[::-1]
+
+    shells_info = {}
+    shells_info['Step'] = np.arange(len(z_edges) - 1)
+    shells_info['z_far'] = z_rev[:-1]
+    shells_info['z_near'] = z_rev[1:]
+    shells_info['delta_z'] = shells_info['z_far'] - shells_info['z_near']
+    shells_info['cmd_far'] = cmd_rev[:-1]
+    shells_info['cmd_near'] = cmd_rev[1:]
+    shells_info['delta_cmd'] = shells_info['cmd_far'] - shells_info['cmd_near']
+    shells_info['z_edges'] = z_rev
+    shells_info['mean_z'] = 0.5 * (z_rev[1:] + z_rev[:-1])
+
+    return shells_info
+
+
+
+import h5py
+def extract_sims_parameters(entry):
+    """Convert a single structured-row entry into a dictionary of cosmological parameters."""
+    H0 = entry['H0']
+    h = H0 / 100.0
+    return {
+        'Omega_b': entry['Ob'],
+        'Omega_nu': entry['O_nu'],
+        'Omega_m': entry['Om'],
+        'Omega_cdm': entry['O_cdm'],
+        'h': h,
+        'w0': entry['w0'],
+        'wa': entry['wa'],
+        'As': entry['As'],
+        'n_s': entry['ns'],
+        'sigma_8': entry['s8'],
+        'm_nu': entry['m_nu'],
+        'n_nu': 3,
+        'box_size_Mpc_over_h': entry['box_size_Mpc_over_h'],
+        'n_shells': entry['n_shells'],
+        'n_steps': entry['n_steps'],
+        'n_particles': entry['n_particles'],
+        'benchmark_type': entry['benchmark_type'].decode('utf-8'),
+        'path_par': entry['path_par'].decode('utf-8'),
+        'id_param': entry['id_param'],
+        'sobol_index': entry['sobol_index'],
+    }
+
+def load_cosmogrid_params(meta_path, key):
+    """
+    Load cosmological parameters for a given run key:
+    - key can be a string ('fiducial', 'delta_H0_p', 'cosmo_000001', etc.)
+    - or an integer id_param.
+    """
+    with h5py.File(meta_path, 'r') as f:
+        params_all = f['parameters/all'][:]
+
+    # Build lookups
+    by_delta = {p['delta'].decode('utf-8'): p for p in params_all if p['delta'].decode('utf-8') != 'none'}
+    by_path  = {p['path_par'].decode('utf-8').split('/')[-1]: p for p in params_all}
+    by_id    = {int(p['id_param']): p for p in params_all}
+
+    # Select the right one
+    if isinstance(key, int):
+        entry = by_id[key]
+    elif key in by_delta:
+        entry = by_delta[key]
+    elif key in by_path:
+        entry = by_path[key]
+    else:
+        raise KeyError(f"Run '{key}' not found in metadata.")
+
+    return extract_sims_parameters(entry)
+
+   
