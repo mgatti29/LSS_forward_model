@@ -258,7 +258,12 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,
                 if nside_maps != nside_original:
                     d = counts/np.mean(counts)-1
                     alm = hp.map2alm(d,lmax = nside_maps*2)
-                    d_filtered = hp.alm2map(alm,nside= nside_maps,pixwin=True)
+
+                    #deconvolve original window function - 
+                    p = hp.sphtfunc.pixwin(nside_original)
+                    alm_scaled = hp.almxfl(alm, 1/p[: nside_maps*2])
+        
+                    d_filtered = hp.alm2map(alm_scaled,nside= nside_maps,pixwin=True)
                     delta.append(d_filtered)
                 else:
                     d = counts/np.mean(counts)-1
@@ -920,6 +925,13 @@ def make_tsz_and_baryonified_density(
     
                 DMO = bfn.Profiles.DarkMatterOnly(**bpar)
                 DMB = bfn.Profiles.DarkMatterBaryon(**bpar)
+
+
+                Pix = bfn.utils.HealPixel(NSIDE=nside_maps)
+                DMO = bfn.ConvolvedProfile(DMO, Pix)
+                DMB = bfn.ConvolvedProfile(DMB, Pix)
+
+            
                 Displacement = bfn.Profiles.Baryonification2D(DMO, DMB, cosmo=cosmo_pyccl, epsilon_max=bpar["epsilon_max"])
     
                 try:
@@ -939,8 +951,10 @@ def make_tsz_and_baryonified_density(
                     counts = np.array(pd.read_parquet(part_path)).astype(np.float32).ravel()
                     
                     nside_original = hp.npix2nside(counts.size) 
+                    p = 1/hp.sphtfunc.pixwin(nside_original)
                     alm = hp.map2alm(counts,lmax = nside_maps*2)
-                    counts = hp.alm2map(alm,nside= nside_maps,pixwin=True)*(nside_original/nside_maps)**2
+                    alm_scaled = hp.almxfl(alm, 1/p[: nside_maps*2])
+                    counts = hp.alm2map(alm_scaled,nside= nside_maps,pixwin=True)*(nside_original/nside_maps)**2
                     
                 else:
                     # use provided particl counts
