@@ -785,17 +785,21 @@ def build_fof_to_m200c_interpolator(
 
 
 
-def load_Flamingo_halo_catalog(path_catalog,sims_parameters,cosmo_bundle, type_cat = 'fof',halo_catalog_log10mass_cut = 13, max_z_halo_catalog = 1.):
+def load_Flamingo_halo_catalog(path_catalog,sims_parameters,cosmo_bundle, type_cat = 'fof',halo_catalog_log10mass_cut = 13, max_z_halo_catalog = 1., no_calib = True):
 
     colossus_cosmology.addCosmology('my_cosmo', cosmo_bundle['colossus_params'])
     colossus_cosmology.setCosmology('my_cosmo')
     
     cat = fits.open(path_catalog)
     if type_cat == 'fof':
-        interpolator_calib = build_fof_to_m200c_interpolator(
+
+        if no_calib:
+            M200c = cat[1].data['M']
+        else:
+            interpolator_calib = build_fof_to_m200c_interpolator(
             sims_parameters, colossus_cosmology)
-        coords = np.column_stack([(np.log10(cat[1].data['M'])), cat[1].data['z']])
-        M200c = interpolator_calib(coords)
+            coords = np.column_stack([(np.log10(cat[1].data['M'])), cat[1].data['z']])
+            M200c = interpolator_calib(coords)
     else:
         M200c = cat[1].data['M']
 

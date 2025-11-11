@@ -913,7 +913,7 @@ def make_tsz_and_baryonified_density(
 
         missing_shells = []
         for i in frogress.bar(range(len(steps))):
-            #try:
+            try:
                 step = steps[i]
                 zmin = float(z_near[i]) + (1e-6 if i == 0 else 0.0)
                 zmax = float(z_far[i])
@@ -958,34 +958,46 @@ def make_tsz_and_baryonified_density(
                     
                 else:
                     # use provided particl counts
-                    counts = particles[i]
+                    counts = copy.deepcopy(particles[i])
                     
 
                 mask_z = (halos["z"] > zmin) & (halos["z"] < zmax)
-    
-                cdict = {
-                    "Omega_m": sims_parameters["Omega_m"],
-                    "sigma8": sims_parameters["sigma_8"],
-                    "h": sims_parameters["h"],
-                    "n_s": sims_parameters["n_s"],
-                    "w0": sims_parameters["w0"],
-                    "Omega_b": sims_parameters["Omega_b"],
-                }
-                halos_ = bfn.utils.HaloLightConeCatalog(
-                    halos["ra"][mask_z], halos["dec"][mask_z], halos["M"][mask_z], halos["z"][mask_z], cosmo=cdict
-                )
-    
-                shell = bfn.utils.LightconeShell(map=counts, cosmo=cdict)
-                runner = bfn.Runners.BaryonifyShell(halos_, shell, epsilon_max=bpar["epsilon_max"], model=Displacement, verbose=True)
-                baryonified_shell = runner.process()
-    
-                if np.mean(baryonified_shell) != 0:
-                    density_b = (baryonified_shell / np.mean(baryonified_shell)) - 1.0
+
+                if len(halos["z"][mask_z])>1:
+                    cdict = {
+                        "Omega_m": sims_parameters["Omega_m"],
+                        "sigma8": sims_parameters["sigma_8"],
+                        "h": sims_parameters["h"],
+                        "n_s": sims_parameters["n_s"],
+                        "w0": sims_parameters["w0"],
+                        "Omega_b": sims_parameters["Omega_b"],
+                    }
+                    halos_ = bfn.utils.HaloLightConeCatalog(
+                        halos["ra"][mask_z], halos["dec"][mask_z], halos["M"][mask_z], halos["z"][mask_z], cosmo=cdict
+                    )
+        
+                    shell = bfn.utils.LightconeShell(map=counts, cosmo=cdict)
+                    runner = bfn.Runners.BaryonifyShell(halos_, shell, epsilon_max=bpar["epsilon_max"], model=Displacement, verbose=True)
+                    baryonified_shell = runner.process()
+        
+                    if np.mean(baryonified_shell) != 0:
+                        density_b = (baryonified_shell / np.mean(baryonified_shell)) - 1.0
+                    else:
+                        density_b = 0.0 * baryonified_shell
+                    density.append(density_b)
+
                 else:
-                    density_b = 0.0 * baryonified_shell
-                density.append(density_b)
-            #except:
-            #    missing_shells.append(step)
+                    if np.mean(counts) != 0:
+                        density_b = (counts / np.mean(counts)) - 1.0
+                        density.append(density_b)
+                    else:
+                        density_b = 0.0 * baryonified_shell
+                        density.append(density_b)
+                        
+                    
+            except:
+                print ('generate step ',step)
+                missing_shells.append(step)
                 
         if len(missing_shells)>0:
  
