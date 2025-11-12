@@ -8,84 +8,125 @@ import pyccl as ccl
 import frogress
 import os
 from typing import Dict, Mapping, Iterable, Optional, Tuple
+import camb
+from cosmology import Cosmology
+import copy
+from .halos import *
+import BaryonForge as bfn
+
 
 
 
 ParamSpec = Iterable[float]  # (low, high, scale)
 
-def draw_baryon_params(
-    specs: Mapping[str, ParamSpec],
-    base: Optional[Mapping[str, float]] = None,
-    *,
-    overrides: Optional[Mapping[str, float]] = None,
-    rng: Optional[np.random.Generator] = None,
-) -> Tuple[Dict[str, float], Dict[str, float]]:
-    rng = np.random.default_rng() if rng is None else rng
-    bpar: Dict[str, float] = dict(base or {})
-    sysdraw: Dict[str, float] = {}
-    for k, spec in specs.items():
-        try:
-            lo, hi, sc = spec
-            has_range = True
-        except (TypeError, ValueError):
-            try:
-                value, sc = spec
-                has_range = False
-            except (TypeError, ValueError) as e:
-                raise ValueError(
-                    f"Spec for '{k}' must be (low, high, scale) or (value, scale); got {spec!r}"
-                ) from e
-        sc = str(sc).lower().strip()
-        if sc not in {"lin", "log", "log10"}:
-            raise ValueError(f"Unknown scale '{sc}' (use 'lin' or 'log10').")
+def add_shells(camb_pars,nside_maps = 1024,missing_shells = None):
 
-        try:
-            lo, hi = float(lo), float(hi)
-            if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
-                raise ValueError(f"Invalid bounds for '{k}': {lo}..{hi}")
-            u = float(rng.uniform(lo, hi))
-            val = 10.0**u if sc in {"log", "log10"} else u
-        except:
-            val = 10.0**value if sc in {"log", "log10"} else value
-        sysdraw[k] = val
-        bpar[k] = val
-    if overrides:
-        bpar.update({k: float(v) for k, v in overrides.items()})
-    return bpar, sysdraw
+    """
+    Build CAMB source windows from the given shells, compute their C_ell,
+    discretize for HEALPix, and draw ONE correlated realization:
+    returns a list of length N (one map per shell).
 
-def load_or_draw_baryon_params(
-    path_sim: str,
-    specs: Mapping[str, ParamSpec],
-    cache_filename: str,
-    base_params_path: Optional[str] = None,
-    overrides: Optional[Mapping[str, float]] = None,
-) -> Tuple[Dict[str, float], Dict[str, float]]:
-    # base params
-    base = {}
-    if base_params_path:
-        base = np.load(base_params_path, allow_pickle=True).item()
+    Parameters
+    ----------
+    camb_pars : camb.CAMBparams
+        A configured CAMB parameter object (will not be mutated).
+    nside_maps : int
+        HEALPix Nside for the output maps.
+    missing_shells : sequence of (z, W, _)
+        Each entry provides the redshift grid and weights for one shell.
+
+    Notes
+    -----
+    - GLASS expects Cls in *upper-triangle* order:
+      (W1xW1, W1xW2, ..., W1xWn, W2xW2, ..., WnxWn).
+    - For scalar (spin-0) number-counts fields, keep *all* correlations:
+      don't pass `ncorr` to `discretized_cls`/`generate` unless you want to
+      intentionally limit correlations to save memory.
+    """
+    
+    lmax = nside_maps*2
+    limber=True
+    limber_lmin=100
+    pars = camb_pars
+    
+    # set up parameters for angular power spectra
+    pars.WantTransfer = True
+    pars.WantCls = True
+    pars.Want_CMB = True
+    #pars.min_l = 1
+    pars.set_for_lmax(lmax)
+    
+    # set up parameters to only compute the intrinsic matter cls
+    pars.SourceTerms.limber_windows = limber
+    pars.SourceTerms.limber_phi_lmin = limber_lmin
+    pars.SourceTerms.counts_density = True
+    pars.SourceTerms.counts_redshift = False
+    pars.SourceTerms.counts_lensing = False
+    pars.SourceTerms.counts_velocity = False
+    pars.SourceTerms.counts_radial = False
+    pars.SourceTerms.counts_timedelay = False
+    pars.SourceTerms.counts_ISW = False
+    pars.SourceTerms.counts_potential = False
+    pars.SourceTerms.counts_evolve = False
+    
+    sources = []
+    for za, wa, _ in missing_shells:
+        s = camb.sources.SplinedSourceWindow(z=za, W=wa)
+        sources.append(s)
+    pars.SourceWindows = sources
+    
+    
+    n = len(sources)
+    cls_ = camb.get_results(pars).get_source_cls_dict(lmax=lmax, raw_cl=True)
+    
+    for i in range(1, n+1):
+        if np.any(cls_[f'W{i}xW{i}'] < 0):
+            warnings.warn('negative auto-correlation in shell {i}; improve accuracy?')
+    
+    cc =  [cls_[f'W{i}xW{j}'] for i in range(1, n+1) for j in range(i, 0, -1)]
+    
+    cls = glass.discretized_cls(cc, nside=nside_maps, lmax=lmax, ncorr=3)
+    fields = glass.gaussian_fields(missing_shells)
+    
+    matter = glass.generate(fields, cls, nside_maps, ncorr=3)
+    maps = list(matter)        # length 15, one HEALPix map per shell
+    return maps
 
 
-    # cache path
-    cache_path = cache_filename if os.path.isabs(cache_filename) else os.path.join(path_sim, cache_filename)
-    # no specs -> just return base (no cache write)
 
-    # load cached draw if present and no overrides
-    if os.path.exists(cache_path) and not overrides:
-        _,sysdraw = np.load(cache_path, allow_pickle=True)
-        if not isinstance(sysdraw, dict):
-            raise ValueError(f"Cache must store a dict: {cache_path}")
-        bpar = {**base, **{k: float(v) for k, v in sysdraw.items()}}
-        return bpar, sysdraw
+def load_or_save_updated_params(path_sim, base_params_path, cache_filename, values_to_update=None, overwrite = False):
+    """
+    Load parameter file if it exists; otherwise create it by updating base values.
+    Saves and returns [bpar, sys] where:
+      bpar = full dict (base + updates)
+      sys  = updated values only
+    """
+    base = np.load(base_params_path, allow_pickle=True).item()
 
-    # draw, save drawn-only dict
-    if specs is None:
-        np.save(cache_path, [base,{}])
-        return dict(base), {}
-    else:
-        bpar, sysdraw = draw_baryon_params(specs, base)
-        np.save(cache_path, [bpar,sysdraw])
-        return bpar, sysdraw
+    if os.path.exists(path_sim+cache_filename):
+        if overwrite == False:
+            return tuple(np.load(path_sim+cache_filename, allow_pickle=True))
+
+    sys = {}
+    if values_to_update:
+        for k, v in values_to_update.items():
+            sys[k] = float(v)
+    bpar = {**base, **sys}
+    np.save(cache_filename, [bpar, sys])
+    return bpar, sys
+
+
+def draw_params_from_specs(specs):
+    """Draw parameter values given specs like {'M_c': (12.5, 15.5, 'lin')}."""
+
+    sysdraw = {}
+    for key, (low, high, kind) in specs.items():
+        if kind == "log10":
+            val = 10 ** np.random.uniform(low, high)
+        else:
+            val = np.random.uniform(low, high)
+        sysdraw[key] = val
+    return sysdraw
 
 
 def baryonify_shell(halos, sims_parameters, counts, bpar, min_z, max_z, nside):
@@ -174,7 +215,7 @@ def baryonify_shell(halos, sims_parameters, counts, bpar, min_z, max_z, nside):
     return density_baryonified
 
 
-def make_density_maps(shells_info,path_simulation,path_output,nside_maps):
+def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,camb_pars):
     """
     Generate or load downgraded Healpy maps of the density contrast for each simulation shell.
 
@@ -186,7 +227,7 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps):
     Parameters
     ----------
     shells_info : dict
-        Dictionary containing metadata for each shell, including a 'Step' key that holds 
+        Dictionary containing metadata for each shell, including a . Step' key that holds 
         the list of simulation timesteps (should be sortable as integers).
     path_simulation : str
         Path to the directory containing the simulation outputs, where each file is named 
@@ -197,29 +238,54 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps):
     Returns
     -------
     delta : np.ndarray
-        Array of downgraded Healpy maps of the density contrast for each shell. Shape is 
+   .     Array of downgraded Healpy maps of the density contrast for each shell. Shape is 
         (number_of_shells, 12 * nside_maps**2).
     """
 
     delta= []
+    missing_shells = []
     for iii in frogress.bar(range(len(shells_info['Step']))):
-        try:
+        try:            
             step = shells_info['Step'][::-1][iii]
             path = path_simulation + '/particles_{0}_4096.parquet'.format(int(step))
             counts = np.array(pd.read_parquet(path)).flatten()
+
+            nside_original = hp.npix2nside(counts.size) 
+            
             if np.sum(counts) == 0:
-                delta.append(hp.ud_grade(counts*1.0,nside_out=1024))
+                delta.append(hp.ud_grade(counts*1.0,nside_out=nside_maps))
             else:
-                d = counts/np.mean(counts)-1
-                delta.append(hp.ud_grade(d,nside_out=1024))
+                if nside_maps != nside_original:
+                    d = counts/np.mean(counts)-1
+                    alm = hp.map2alm(d,lmax = nside_maps*2)
+
+                    #deconvolve original window function - 
+                    p = hp.sphtfunc.pixwin(nside_original)
+                    alm_scaled = hp.almxfl(alm, 1/p[: nside_maps*2])
+        
+                    d_filtered = hp.alm2map(alm_scaled,nside= nside_maps,pixwin=True)
+                    delta.append(d_filtered)
+                else:
+                    d = counts/np.mean(counts)-1
+                    delta.append(d)
         except:
-            pass
+            missing_shells.append(step)
+
+    # Add missing shells --------------------
+    if len(missing_shells)>0:
+        missing_shells = [shells[np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]
+        density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
+
+        for d in density_to_be_added:
+            delta.append(d)  
     delta = np.array(delta)
     np.save(path_output,delta)
     return delta
 
- 
 
+
+
+    
 
 def convert_to_pix_coord(ra, dec, nside=1024):
     """
@@ -328,6 +394,65 @@ def shift_nz(z, nz, z_rebinned, delta_z=0.0, renorm="source"):
 
     return nz_shifted
 
+
+def apply_nz_shifts_and_build_shells(
+    z_rebinned,
+    nz_all,
+    dz_values,
+    shells_info,
+    renorm="source",
+    samples_per_shell=100,
+):
+    """
+    Apply redshift shifts to pre-rebinned n(z) arrays, normalize them,
+    and build lensing shells.
+
+    Parameters
+    ----------
+    z_rebinned : array
+        Redshift grid (already rebinned / defined upstream).
+    nz_all : list of arrays
+        List of n(z) arrays (one per tomographic bin, including total if desired).
+        Must be on the same z_rebinned grid.
+    dz_values : list or np.ndarray
+        List of delta-z shifts for each tomographic bin.
+    shells_info : dict
+        Output of recover_shell_info().
+    renorm : str, optional
+        Passed to shift_nz(); controls normalization mode.
+    samples_per_shell : int, optional
+        Number of samples per shell when building the windows.
+
+    Returns
+    -------
+    nz_shifted : np.ndarray
+        Shifted and normalized n(z) for each tomographic bin.
+    shells, steps, zeff, ngal_glass : tuple
+        Outputs from build_shell_windows_and_partitions().
+    """
+    nz_shifted = []
+    for ix, dz in enumerate(dz_values):
+        nz_rebinned = nz_all[ix]
+        shifted = shift_nz(
+            z=z_rebinned,
+            nz=nz_rebinned,
+            z_rebinned=z_rebinned,
+            delta_z=dz,
+            renorm=renorm,
+        )
+        shifted /= np.trapz(shifted, z_rebinned)
+        nz_shifted.append(shifted)
+    nz_shifted = np.array(nz_shifted)
+
+    shells, steps, zeff, ngal_glass = build_shell_windows_and_partitions(
+        shells_info=shells_info,
+        redshift=z_rebinned,
+        nz=nz_shifted,
+        samples_per_shell=samples_per_shell,
+    )
+
+    return nz_shifted, shells, steps, zeff, ngal_glass
+    
 
 def F_nla(z, om0, A_ia, rho_c1, eta=0.0, z0=0.0, cosmo=None):
     """
@@ -547,4 +672,339 @@ def build_shell_windows_and_partitions(
                            for nz_i in nz], dtype=float)
 
     return shells, steps, zeff_array, ngal_glass
+
+
+def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
+                           do_kappa=True, do_shear=True, do_IA=False):
+    """
+    Compute kappa, shear, and/or intrinsic-alignment shear fields
+    from a set of density shells using glass.lensing.
+
+    Parameters
+    ----------
+    density : list of arrays
+        Density maps per shell.
+    shells : list
+        Corresponding shell window definitions.
+    camb_pars : dict
+        CAMB parameters (for Cosmology.from_camb).
+    nside_maps : int
+        Healpix nside for the maps.
+    do_kappa, do_shear, do_IA : bool
+        Control which fields are returned.
+
+    Returns
+    -------
+    dict
+        Dictionary containing requested fields among
+        {"kappa", "gamma", "IA_shear"}.
+    """
+    cosmo = Cosmology.from_camb(camb_pars)
+    results = {}
+
+    if do_kappa or do_shear:
+        conv = glass.lensing.MultiPlaneConvergence(cosmo)
+        kappa_list, gamma_list = [], []
+        for ss in frogress.bar(range(len(density))):
+            conv.add_window(density[ss], shells[ss])
+            kappa = copy.deepcopy(conv.kappa)
+            if do_kappa:
+                kappa_list.append(kappa)
+            if do_shear:
+                gamma_list.append(glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True))
+        if do_kappa:
+            results["kappa"] = np.array(kappa_list)
+        if do_shear:
+            results["gamma"] = np.array(gamma_list)
+
+    if do_IA:
+        IA_list = []
+        for ss in frogress.bar(range(len(density))):
+            IA_list.append(
+                glass.lensing.from_convergence(
+                    density[ss] - np.mean(density[ss]),
+                    lmax=nside_maps*3-1,
+                    shear=True
+                )
+            )
+        results["IA_shear"] = np.array(IA_list)
+
+    return results
+
+
+def integrate_field(ngal_glass,field):
+    nside_maps = hp.npix2nside(len(field[0]))
+    field_tomo = np.zeros((len(ngal_glass),nside_maps**2*12))
+    for tomo in range(len(ngal_glass)):
+        for i in range(len(field)):
+             field_tomo[tomo,:] += ngal_glass[tomo,i] * field[i]  
+    return field_tomo
+
+
+def load_and_baryonify_gower_st_shells(
+    path_simulation,
+    sims_parameters,
+    cosmo_bundle,
+    baryons,
+    nside_maps,
+    shells_info,
+    shells,
+    overwrite_baryonified_shells = False
+):
+    """
+    Load or create baryonified (or normal) GowerSt2 density shells.
+
+    Returns
+    -------
+    density : np.ndarray
+        Array of density shells.
+    label_baryonification : str
+        'baryonified' or 'normal'
+    """
     
+    if baryons["enabled"]:
+        
+        bpar, sys = load_or_save_updated_params(path_simulation,baryons['base_params_path'],baryons['filename_new_params'],baryons['values_to_update'], overwrite = False)
+        label_baryonification = "baryonified"
+
+        halo_catalog_path = os.path.join(path_simulation, "halo_catalog.parquet")
+        tsz_path = os.path.join(path_simulation, f"tsz_{nside_maps}.npy")
+        dens_path = os.path.join(path_simulation, f"delta_b_{nside_maps}.npy")
+
+        # --- Create halo catalog if missing
+        if not os.path.exists(halo_catalog_path):
+            print("Creating halo light cone...")
+            save_halocatalog(
+                shells_info,
+                sims_parameters,
+                max_redshift=baryons['max_z_halo_catalog'],
+                halo_snapshots_path=path_simulation,
+                catalog_path=halo_catalog_path,
+            )
+
+        # --- Create baryonified density (and tSZ if needed)
+        if overwrite_baryonified_shells and os.path.exists(dens_path):
+            try:
+                os.remove(dens_path)
+            except:
+                pass
+        if not os.path.exists(dens_path) or (baryons['do_tSZ'] and not os.path.exists(tsz_path)):
+            
+            halos = load_halo_catalog(
+                halo_catalog_path,
+                cosmo_bundle['colossus_params'],
+                sims_parameters,
+                baryons['mass_cut'],
+            )
+            
+            make_tsz_and_baryonified_density(
+                path_simulation,
+                sims_parameters,
+                cosmo_bundle['cosmo_pyccl'],
+                halos,
+                bpar,
+                nside_maps,
+                shells_info,
+                dens_path,
+                tsz_path,
+                baryons['do_tSZ'],
+                shells,
+                cosmo_bundle['pars_camb'],
+                baryons['mass_cut'],
+            )
+
+        density = np.load(dens_path, allow_pickle=True)
+
+    else:
+        label_baryonification = "normal"
+        dens_path = os.path.join(path_simulation, f"delta_{nside_maps}.npy")
+
+        if not os.path.exists(dens_path):
+            density = make_density_maps(
+                shells_info,
+                path_simulation,
+                dens_path,
+                nside_maps,
+                shells,
+                cosmo_bundle['pars_camb'],
+            )
+        else:
+            density = np.load(dens_path, allow_pickle=True)
+
+    return density, label_baryonification
+
+
+def make_tsz_and_baryonified_density(
+    path_simulation: str,
+    sims_parameters: dict,
+    cosmo_pyccl,
+    halos: dict,
+    bpar: dict,
+    nside_maps: int,
+    shells_info: dict,
+    dens_path: str,
+    tsz_path: str,
+    do_tSZ: bool,
+    shells,
+    camb_pars,
+    min_mass: float = 13,                      # Msun/h threshold after FoF->SO
+    njobs: int = 16,
+    particles = None,
+):
+
+    """
+    Build (if missing) tSZ map and baryonified density shells, saving them to disk.
+    Returns the density array for downstream lensing.
+
+    Outputs
+    -------
+    tsz file:  path_simulation + f"/tsz_{nside_maps}.npy"
+    dens file: path_simulation + f"/density_b_{nside_maps}_{noise_rel}.npy"
+    """
+  
+    # ---------- tSZ ----------
+    if do_tSZ:
+        if not os.path.exists(tsz_path):
+            print ('creating a tSZ map --')
+            mask = (halos['M'] > 10**min_mass)
+            cdict = {
+                "Omega_m": sims_parameters["Omega_m"],
+                "sigma8": sims_parameters["sigma_8"],
+                "h": sims_parameters["h"],
+                "n_s": sims_parameters["n_s"],
+                "w0": sims_parameters["w0"],
+                "Omega_b": sims_parameters["Omega_b"],
+            }
+    
+            halos_ = bfn.utils.HaloLightConeCatalog(
+                halos["ra"][mask], halos["dec"][mask], halos['M'][mask], halos["z"][mask], cosmo=cdict
+            )
+    
+            Gas = bfn.Profiles.Gas(**bpar)
+            DMB = bfn.Profiles.DarkMatterBaryon(**bpar, twohalo=0 * bfn.Profiles.TwoHalo(**bpar))
+            PRS = bfn.Profiles.Pressure(gas=Gas, darkmatterbaryon=DMB)
+            PRS = PRS * (1 - bfn.Profiles.Thermodynamic.NonThermalFrac(**bpar))
+            PRS = bfn.Profiles.ThermalSZ(PRS)
+            PRS = bfn.Profiles.misc.ComovingToPhysical(PRS, factor=-3)
+            Pix = bfn.utils.HealPixel(NSIDE=nside_maps)
+            PRS = bfn.utils.ConvolvedProfile(PRS, Pix)
+            PRS = bfn.utils.TabulatedProfile(PRS, cosmo_pyccl)
+    
+            zmin, zmax = float(halos["z"].min()), float(halos["z"].max())
+            PRS.setup_interpolator(
+                z_min=zmin, z_max=zmax, N_samples_z=10, z_linear_sampling=True,
+                R_min=1e-4, R_max=300, N_samples_R=2000, verbose=True
+            )
+    
+            shell = bfn.utils.LightconeShell(np.zeros(hp.nside2npix(nside_maps)), cosmo=cdict)
+            runner = bfn.Runners.PaintProfilesShell(halos_, shell, epsilon_max=bpar["epsilon_max"], model=PRS, verbose=True)
+            painted_shell = bfn.utils.SplitJoinParallel(runner, njobs=njobs).process()
+            np.save(tsz_path, painted_shell)
+
+            
+            
+    # ---------- Baryonified density shells ----------
+    if not os.path.exists(dens_path):
+        print ('baryonifying shells --')
+        density = []
+        steps = shells_info["Step"][::-1]
+        z_near = shells_info["z_near"][::-1]
+        z_far = shells_info["z_far"][::-1]
+
+        missing_shells = []
+        for i in frogress.bar(range(len(steps))):
+            try:
+                step = steps[i]
+                zmin = float(z_near[i]) + (1e-6 if i == 0 else 0.0)
+                zmax = float(z_far[i])
+    
+                # shell thickness for projection cutoff
+                chi = ccl.comoving_radial_distance
+                shell_thickness = chi(cosmo_pyccl, 1.0 / (1.0 + zmax)) - chi(cosmo_pyccl, 1.0 / (1.0 + zmin))
+                bpar["proj_cutoff"] = float(shell_thickness / 2.0)
+    
+                DMO = bfn.Profiles.DarkMatterOnly(**bpar)
+                DMB = bfn.Profiles.DarkMatterBaryon(**bpar)
+
+
+                Pix = bfn.utils.HealPixel(NSIDE=nside_maps)
+                DMO = bfn.ConvolvedProfile(DMO, Pix)
+                DMB = bfn.ConvolvedProfile(DMB, Pix)
+
+            
+                Displacement = bfn.Profiles.Baryonification2D(DMO, DMB, cosmo=cosmo_pyccl, epsilon_max=bpar["epsilon_max"])
+    
+                try:
+                    Displacement.setup_interpolator(
+                        z_min=zmin, z_max=zmax, N_samples_z=2, z_linear_sampling=True,
+                        R_min=1e-4, R_max=300, N_samples_R=2000, verbose=True
+                    )
+                except Exception:
+                    Displacement.setup_interpolator(
+                        z_min=zmin, z_max=zmax, N_samples_z=2, z_linear_sampling=True,
+                        R_min=1e-9, R_max=2000, N_samples_R=4000, verbose=True
+                    )
+
+                if particles is None:
+                    # read it from Gower St format ---------
+                    part_path = os.path.join(path_simulation, f"particles_{int(step)}_4096.parquet")
+                    counts = np.array(pd.read_parquet(part_path)).astype(np.float32).ravel()
+                    
+                    nside_original = hp.npix2nside(counts.size) 
+                    p = 1/hp.sphtfunc.pixwin(nside_original)
+                    alm = hp.map2alm(counts,lmax = nside_maps*2)
+                    alm_scaled = hp.almxfl(alm, 1/p[: nside_maps*2])
+                    counts = hp.alm2map(alm_scaled,nside= nside_maps,pixwin=True)*(nside_original/nside_maps)**2
+                    
+                else:
+                    # use provided particl counts
+                    counts = copy.deepcopy(particles[i])
+                    
+
+                mask_z = (halos["z"] > zmin) & (halos["z"] < zmax)
+
+                if len(halos["z"][mask_z])>1:
+                    cdict = {
+                        "Omega_m": sims_parameters["Omega_m"],
+                        "sigma8": sims_parameters["sigma_8"],
+                        "h": sims_parameters["h"],
+                        "n_s": sims_parameters["n_s"],
+                        "w0": sims_parameters["w0"],
+                        "Omega_b": sims_parameters["Omega_b"],
+                    }
+                    halos_ = bfn.utils.HaloLightConeCatalog(
+                        halos["ra"][mask_z], halos["dec"][mask_z], halos["M"][mask_z], halos["z"][mask_z], cosmo=cdict
+                    )
+        
+                    shell = bfn.utils.LightconeShell(map=counts, cosmo=cdict)
+                    runner = bfn.Runners.BaryonifyShell(halos_, shell, epsilon_max=bpar["epsilon_max"], model=Displacement, verbose=True)
+                    baryonified_shell = runner.process()
+        
+                    if np.mean(baryonified_shell) != 0:
+                        density_b = (baryonified_shell / np.mean(baryonified_shell)) - 1.0
+                    else:
+                        density_b = 0.0 * baryonified_shell
+                    density.append(density_b)
+
+                else:
+                    if np.mean(counts) != 0:
+                        density_b = (counts / np.mean(counts)) - 1.0
+                        density.append(density_b)
+                    else:
+                        density_b = 0.0 * baryonified_shell
+                        density.append(density_b)
+                        
+                    
+            except:
+                print ('generate step ',step)
+                missing_shells.append(step)
+                
+        if len(missing_shells)>0:
+ 
+            missing_shells = [shells[np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]       
+            density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
+            for d in density_to_be_added:
+                density.append(d)   
+        density = np.asarray(density, dtype=np.float32)
+        np.save(dens_path, density)
+

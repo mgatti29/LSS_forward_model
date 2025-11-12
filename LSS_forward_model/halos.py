@@ -7,8 +7,12 @@ import pyccl as ccl
 from scipy.interpolate import CubicSpline
 from typing import Optional, Dict
 import frogress
-from .tsz import build_fof_to_m200c_interpolator
 from colossus.cosmology import cosmology as colossus_cosmology
+from scipy.optimize import root_scalar
+from scipy.interpolate import RegularGridInterpolator
+import BaryonForge as bfn
+import astropy.io.fits as fits
+
 def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snapshots_path = '' , catalog_path = 'halo_catalog.parquet',log10_mass_limit = None):
 
     """
@@ -496,5 +500,319 @@ def load_halo_catalog(
         "z":   z[mask],
         "ra":  ra[mask],
         "dec": dec[mask],
+    }
+    return halos
+
+
+def mu(c):
+    """
+    Helper for NFW profiles: μ(c) = ln(1+c) − c/(1+c).
+
+    Parameters
+    ----------
+    c : float or array-like
+        Concentration parameter (>0).
+
+    Returns
+    -------
+    float or ndarray
+        μ(c).
+    """
+    return np.log(1 + c) - c / (1 + c)
+
+
+def enclosed_overdensity(c, b=0.2, nc=0.652960):
+    """
+    Effective enclosed overdensity matched to a FoF linking length.
+
+    Implements Eq. (10) of More et al. (2011), giving the mean overdensity
+    inside the FoF boundary for an NFW halo of concentration `c`.
+
+    Parameters
+    ----------
+    c : float or array-like
+        NFW concentration.
+    b : float, optional
+        FoF linking length (in units of mean inter-particle separation). Default 0.2.
+    nc : float, optional
+        Numerical factor from More+2011 (≈ 0.652960).
+
+    Returns
+    -------
+    float or ndarray
+        Overdensity Δ_FoF/ρ̄ − 1 (i.e., 〈ρ〉/ρ̄ − 1).
+    """
+    return 3 * nc * b**-3 * mu(c) * (1 + c)**2 / c**2 - 1
+
+
+def c_zhao2009(M, z):
+    """
+    Zhao et al. (2009) concentration–mass relation for 200c halos.
+
+    Parameters
+    ----------
+    M : float or array-like
+        Halo mass (Msun/h) defined at 200c.
+    z : float or array-like
+        Redshift.
+
+    Returns
+    -------
+    float or ndarray
+        Concentration c_200c.
+    """
+    M_pivot = 1e14  # Msun/h
+    A, B, C = 4.67, -0.11, -1.0
+    return A * (M / M_pivot)**B * (1 + z)**C
+
+
+def m_nfw(r, rs, rho_s):
+    """
+    Enclosed mass for an NFW profile at radius r.
+
+    Parameters
+    ----------
+    r : float or array-like
+        Radius (same distance units as rs).
+    rs : float
+        NFW scale radius.
+    rho_s : float
+        NFW scale density.
+
+    Returns
+    -------
+    float or ndarray
+        M(<r) with units of rho_s * rs^3.
+    """
+    x = r / rs
+    return 4 * np.pi * rho_s * rs**3 * (np.log(1 + x) - x / (1 + x))
+
+
+def c_of_delta(delta, M_fof, z=0):
+    """
+    Placeholder c–M relation (Duffy et al. 2008-ish) for a given overdensity.
+
+    Parameters
+    ----------
+    delta : float
+        Target overdensity label (unused in this simplified stub).
+    M_fof : float
+        FoF mass (Msun/h).
+    z : float, optional
+        Redshift.
+
+    Returns
+    -------
+    float
+        Approximate concentration.
+
+    Notes
+    -----
+    This is a rough stub (tuned to 200c); for accurate work, use a proper
+    concentration model and/or conversion routine.
+    """
+    A, B, C = 5.71, -0.084, -0.47  # typical for 200c
+    return A * (M_fof / 2e12)**B * (1 + z)**C
+
+
+def infer_overdensity_from_fof(M_fof, M_fof_corr, b=0.2, z=0, tol=1e-3,
+                               conc_corr_factor=True, cosmo='planck15'):
+    """
+    Infer the effective enclosed overdensity for a FoF halo (More+2011 approach).
+
+    Steps:
+      1) Get c_200c(M, z) from Colossus (Ishiyama+21 model), optionally scaled.
+      2) Convert FoF linking length b to an effective FoF overdensity using
+         the NFW mapping (More+2011 Eq. 10).
+
+    Parameters
+    ----------
+    M_fof : float
+        Original FoF mass (Msun/h). (Not used directly; kept for API symmetry.)
+    M_fof_corr : float
+        Corrected FoF mass used to evaluate the concentration (Msun/h).
+    b : float, optional
+        FoF linking length (default 0.2).
+    z : float, optional
+        Redshift.
+    tol : float, optional
+        Convergence tolerance for the fixed-point iteration on Δ (rarely needs many iters).
+    conc_corr_factor : bool, optional
+        If True, multiply Colossus c(M) by 0.6*z + 0.8 (empirical tweak).
+    cosmo : str or dict, optional
+        Colossus cosmology name or definition (default 'planck15').
+
+    Returns
+    -------
+    Delta_eff : float
+        Effective enclosed overdensity (w.r.t. mean density), i.e., 〈ρ〉/ρ̄ − 1.
+    c_200c : float
+        Concentration used (at 200c).
+
+    Raises
+    ------
+    RuntimeError
+        If the iteration fails to converge.
+    """
+    # get concentration from Colossus
+
+    from colossus.halo import concentration
+
+    corr = (0.6 * z + 0.8) if conc_corr_factor else 1.0
+    c = corr * concentration.concentration(M_fof_corr, '200c', z, model='ishiyama21')
+
+    # fixed-point iteration (usually converges in ≤ a few steps)
+    Delta_guess = 200.0
+    for _ in range(10):
+        Delta_new = enclosed_overdensity(c, b=b)
+        if abs(Delta_new - Delta_guess) < tol:
+            return Delta_new, c
+        Delta_guess = Delta_new
+
+    raise RuntimeError("Overdensity iteration did not converge.")
+
+
+def fof_to_mdelta(M_fof, Delta_fof, c_fof, Delta_target=200, ref_density='mean',
+                  Omega_m=0.3, H0=70.0):
+    """
+    Convert FoF mass M_FoF to a spherical-overdensity mass M_Δ (NFW assumption).
+
+    Treat the FoF halo as an NFW with concentration c_fof and mean enclosed density
+    Δ_fof * ρ_ref_FoF (here taken as Δ_fof * ρ_m). Solve for R_Δ such that
+    〈ρ(<R_Δ)〉 = Δ_target * ρ_ref, then return M_Δ = M(<R_Δ).
+
+    Parameters
+    ----------
+    M_fof : float
+        FoF mass (Msun/h).
+    Delta_fof : float
+        Enclosed overdensity of the FoF halo (w.r.t. mean matter density, ρ_m).
+    c_fof : float
+        Concentration of the FoF halo (R_FoF / r_s).
+    Delta_target : float, optional
+        Desired spherical overdensity (e.g., 200).
+    ref_density : {"mean","crit"}, optional
+        Reference density for the target mass definition (ρ_m or ρ_c).
+    Omega_m : float, optional
+        Matter density parameter at z relevant for the conversion (default 0.3).
+    H0 : float, optional
+        Hubble constant [km/s/Mpc] for ρ_c calculation (default 70).
+
+    Returns
+    -------
+    M_delta : float
+        Spherical-overdensity mass M_Δ_target (Msun/h).
+
+    Raises
+    ------
+    RuntimeError
+        If the root finding for R_Δ fails.
+
+    Notes
+    -----
+    Units: G is taken as 4.30091e-9 Mpc⋅Msun⁻¹⋅(km/s)² so that
+           ρ_c = 3 H0² / (8πG) has units Msun/Mpc³ when H0 is in km/s/Mpc.
+    """
+    # critical and reference densities
+    G = 4.30091e-9  # Mpc * Msun^-1 * (km/s)^2
+    rho_crit = 3.0 * (H0**2) / (8.0 * np.pi * G)  # Msun / Mpc^3
+    rho_m = Omega_m * rho_crit
+    rho_ref = rho_m if ref_density == 'mean' else rho_crit
+
+    # FoF radius from mean-density definition (Δ_fof w.r.t. ρ_m)
+    R_fof = (3.0 * M_fof / (4.0 * np.pi * Delta_fof * rho_m))**(1.0 / 3.0)
+
+    # NFW params
+    rs = R_fof / c_fof
+    rho_s = M_fof / (4.0 * np.pi * rs**3 * mu(c_fof))
+
+    # Solve for R_Δ: 〈ρ(<R)〉 = Δ_target * ρ_ref
+    def mean_density_minus_target(r):
+        return m_nfw(r, rs, rho_s) / ((4.0 / 3.0) * np.pi * r**3) - Delta_target * rho_ref
+
+    # robust bracket (r must be > 0 and < few x R_fof)
+    a, b = 1e-6 * rs, 10.0 * R_fof
+    sol = root_scalar(mean_density_minus_target, bracket=[a, b], method='brentq')
+    if not sol.converged:
+        raise RuntimeError("Root finding for R_delta failed.")
+
+    R_delta = sol.root
+    M_delta = m_nfw(R_delta, rs, rho_s)
+    return M_delta
+
+
+def build_fof_to_m200c_interpolator(
+    sims_parameters: dict,
+    cosmo_colossus,
+    logM_grid=(12.0, 15.5, 200),
+    z_grid=(0.0, 1.5, 200),
+):
+    """
+    Build or load a RegularGridInterpolator mapping (log10 M_fof, z) -> M_200c.
+    Use `cache_path` (.npz) to save/reuse the expensive grid.
+    """
+    from colossus.halo import concentration  # local import to keep it optional
+
+    lmin, lmax, nL = logM_grid
+    zmin, zmax, nZ = z_grid
+    lg = np.linspace(lmin, lmax, nL)
+    zg = np.linspace(zmin, zmax, nZ)
+
+
+    logM_mesh, z_mesh = np.meshgrid(lg, zg, indexing="ij")
+    M_mesh = 10.0**logM_mesh
+    M200c_grid = np.empty_like(M_mesh)
+
+    # NOTE: this nested loop is heavy; consider parallelizing or precomputing offline.
+    for i in range(logM_mesh.shape[0]):
+        for j in range(logM_mesh.shape[1]):
+            M_ = M_mesh[i, j]
+            z_ = z_mesh[i, j]
+            Delta_fof, c_fof = infer_overdensity_from_fof(  # your function from halos.py
+                M_, M_, z=z_, conc_corr_factor=True, cosmo=cosmo_colossus
+            )
+            M200c_grid[i, j] = fof_to_mdelta(               # your function from halos.py
+                M_,
+                Delta_fof,
+                c_fof,
+                Delta_target=200,
+                ref_density="crit",
+                Omega_m=sims_parameters["Omega_m"],
+                H0=sims_parameters["h"] * 100.0,
+            )
+
+    return RegularGridInterpolator((lg, zg), M200c_grid, bounds_error=False, fill_value=None)
+
+
+
+def load_Flamingo_halo_catalog(path_catalog,sims_parameters,cosmo_bundle, type_cat = 'fof',halo_catalog_log10mass_cut = 13, max_z_halo_catalog = 1., no_calib = True):
+
+    colossus_cosmology.addCosmology('my_cosmo', cosmo_bundle['colossus_params'])
+    colossus_cosmology.setCosmology('my_cosmo')
+    
+    cat = fits.open(path_catalog)
+    if type_cat == 'fof':
+
+        if no_calib:
+            M200c = cat[1].data['M']
+        else:
+            interpolator_calib = build_fof_to_m200c_interpolator(
+            sims_parameters, colossus_cosmology)
+            coords = np.column_stack([(np.log10(cat[1].data['M'])), cat[1].data['z']])
+            M200c = interpolator_calib(coords)
+    else:
+        M200c = cat[1].data['M']
+
+    z_all   = cat[1].data['z']
+    ra_all  = cat[1].data['ra']
+    dec_all = cat[1].data['dec']
+
+    mask = (np.log10(M200c) > halo_catalog_log10mass_cut) & (z_all<max_z_halo_catalog)
+
+    halos = {
+        "M":   M200c[mask],
+        "z":   z_all[mask],
+        "ra":  ra_all[mask],
+        "dec": dec_all[mask],
     }
     return halos

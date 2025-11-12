@@ -1,7 +1,9 @@
 import numpy as np
 from typing import Sequence, Tuple
 import pandas as pd  # only for typing/self; safe to remove if not needed
-
+import pyccl as ccl  
+from .maps import F_nla,convert_to_pix_coord,rotate_and_rebin
+import healpy as hp
 
 def addSourceEllipticity(
     self: "pd.DataFrame",
@@ -116,3 +118,163 @@ def apply_random_rotation(e1_in: np.ndarray, e2_in: np.ndarray) -> Tuple[np.ndar
     e1_out = e1_in * c + e2_in * s
     e2_out = -e1_in * s + e2_in * c
     return e1_out, e2_out
+
+
+def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_maps, fields, cats_Euclid, SC_corrections =None,do_catalog = False, include_SC = True):
+    if include_SC:
+        corr_variance_array =  [  SC_corrections['corr_variance_fit'][tomo](sims_parameters['bias_sc'][tomo])        for tomo in range(len(ngal_glass))]
+        coeff_kurtosis_array = [  SC_corrections['coeff_kurtosis_fit'][tomo](sims_parameters['bias_sc'][tomo])       for tomo in range(len(ngal_glass))]
+        A_corr_array = [  SC_corrections['A_corr_fit'][tomo](sims_parameters['bias_sc'][tomo])                       for tomo in range(len(ngal_glass))]
+    else:
+        corr_variance_array = np.ones(len(ngal_glass))
+        coeff_kurtosis_array = np.zeros(len(ngal_glass))
+        A_corr_array  = np.ones(len(ngal_glass))
+        sims_parameters['bias_sc'] = np.zeros(len(ngal_glass))
+    
+    
+    
+    
+    kappa_tot  = np.zeros((len(ngal_glass), 12*nside_maps**2))
+    g1_tot     = np.zeros((len(ngal_glass), 12*nside_maps**2))
+    g2_tot     = np.zeros((len(ngal_glass), 12*nside_maps**2))
+    d_tot      = np.zeros((len(ngal_glass), 12*nside_maps**2))
+    
+    
+    # load each lightcone output in turn and add it to the simulation
+    # note: I added a -sign to gamma to match data conventions later
+    for tomo in range(len(ngal_glass)):
+        for i in (range(len(fields['gamma']))):       
+            C1 = 5e-14
+            rho_crit0_h2 = ccl.physical_constants.RHO_CRITICAL
+            rho_c1 = C1 * rho_crit0_h2
+            IA_f = F_nla(z=zeff_glass[i],
+             om0=sims_parameters['Omega_m'],
+             A_ia=sims_parameters['A_IA'], rho_c1=rho_c1, eta=sims_parameters['eta_IA'], z0=0.67,
+             cosmo=cosmo_bundle['cosmo_pyccl'])
+            
+            g1_tot[tomo] += ngal_glass[tomo,i] * (-fields['gamma'][i][0].real-fields['IA_shear'][i][0].real*IA_f) * (1 + sims_parameters['bias_sc'][tomo] * fields['density'][i])
+            g2_tot[tomo] += ngal_glass[tomo,i] * (-fields['gamma'][i][0].imag-fields['IA_shear'][i][0].imag*IA_f) * (1 + sims_parameters['bias_sc'][tomo] * fields['density'][i])
+            d_tot[tomo]  += ngal_glass[tomo,i] * (1 + sims_parameters['bias_sc'][tomo] * fields['density'][i] )
+       
+    
+    sims_parameters.setdefault('rot', 0)
+    sims_parameters.setdefault('delta_rot', 0)
+
+    maps_Gower = dict()
+    for tomo in range(len(ngal_glass)):
+        maps_Gower[tomo] = dict()
+
+
+
+        pix_ = convert_to_pix_coord(cats_Euclid[tomo]['ra'],cats_Euclid[tomo]['dec'], nside=nside_maps*2)
+        pix = rotate_and_rebin(pix_, nside_maps, sims_parameters['rot'], delta_=sims_parameters['delta_rot'])
+             
+
+        # source clustering term ~
+        f = 1./np.sqrt(d_tot[tomo])
+        f = f[pix]
+    
+    
+        n_map = np.zeros(hp.nside2npix(nside_maps))
+        n_map_sc = np.zeros(hp.nside2npix(nside_maps))
+    
+                        
+        unique_pix, idx, idx_rep = np.unique(pix, return_index=True, return_inverse=True)
+    
+    
+        n_map_sc[unique_pix] += np.bincount(idx_rep, weights=cats_Euclid[tomo]['w']/f**2)
+        n_map[unique_pix] += np.bincount(idx_rep, weights=cats_Euclid[tomo]['w'])
+    
+        g1_ = g1_tot[tomo][pix]
+        g2_ = g2_tot[tomo][pix]
+    
+    
+        es1,es2 = apply_random_rotation(cats_Euclid[tomo]['e1']/f, cats_Euclid[tomo]['e2']/f)
+        es1_ref,es2_ref = apply_random_rotation(cats_Euclid[tomo]['e1'], cats_Euclid[tomo]['e2'])
+        es1a,es2a = apply_random_rotation(cats_Euclid[tomo]['e1']/f, cats_Euclid[tomo]['e2']/f)
+    
+    
+        #x1_sc,x2_sc = addSourceEllipticity({'shear1':g1_,'shear2':g2_},{'e1':es1,'e2':es2},es_colnames=("e1","e2"))
+    
+    
+        e1r_map = np.zeros(hp.nside2npix (nside_maps))
+        e2r_map = np.zeros(hp.nside2npix (nside_maps))
+        e1r_map0 = np.zeros(hp.nside2npix(nside_maps))
+        e2r_map0 = np.zeros(hp.nside2npix(nside_maps))
+        e1r_map0_ref = np.zeros(hp.nside2npix(nside_maps))
+        e2r_map0_ref = np.zeros(hp.nside2npix(nside_maps))
+        g1_map = np.zeros(hp.nside2npix(nside_maps))
+        g2_map = np.zeros(hp.nside2npix(nside_maps))
+    
+        unique_pix, idx, idx_rep = np.unique(pix, return_index=True, return_inverse=True)
+    
+    
+        e1r_map[unique_pix] += np.bincount(idx_rep, weights=es1*cats_Euclid[tomo]['w'])
+        e2r_map[unique_pix] += np.bincount(idx_rep, weights=es2*cats_Euclid[tomo]['w'])
+    
+        e1r_map0[unique_pix] += np.bincount(idx_rep, weights=es1a*cats_Euclid[tomo]['w'])
+        e2r_map0[unique_pix] += np.bincount(idx_rep, weights=es2a*cats_Euclid[tomo]['w'])
+    
+        e1r_map0_ref[unique_pix] += np.bincount(idx_rep, weights=es1_ref*cats_Euclid[tomo]['w'])
+        e2r_map0_ref[unique_pix] += np.bincount(idx_rep, weights=es2_ref*cats_Euclid[tomo]['w'])
+    
+    
+        mask_sims = n_map_sc != 0.
+        e1r_map[mask_sims]  = e1r_map[mask_sims]/(n_map_sc[mask_sims])
+        e2r_map[mask_sims] =  e2r_map[mask_sims]/(n_map_sc[mask_sims])
+        e1r_map0[mask_sims]  = e1r_map0[mask_sims]/(n_map_sc[mask_sims])
+        e2r_map0[mask_sims] =  e2r_map0[mask_sims]/(n_map_sc[mask_sims])
+        e1r_map0_ref[mask_sims]  = e1r_map0_ref[mask_sims]/(n_map[mask_sims])
+        e2r_map0_ref[mask_sims] =  e2r_map0_ref[mask_sims]/(n_map[mask_sims])
+    
+    
+    
+        var_ =  e1r_map0_ref**2+e2r_map0_ref**2
+    
+    
+        #'''
+        e1r_map   *= 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
+        e2r_map   *= 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
+        e1r_map0  *= 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
+        e2r_map0  *= 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
+    
+    
+    
+        
+        
+        #'''
+        g1_map[unique_pix] += np.bincount(idx_rep, weights= g1_*cats_Euclid[tomo]['w'])
+        g2_map[unique_pix] += np.bincount(idx_rep, weights= g2_*cats_Euclid[tomo]['w'])
+    
+    
+    
+        g1_map[mask_sims]  = g1_map[mask_sims]/(n_map_sc[mask_sims])
+        g2_map[mask_sims] =  g2_map[mask_sims]/(n_map_sc[mask_sims])
+    
+        e1_ = ((g1_map+e1r_map0))#[mask_sims]
+        e2_ = ((g2_map+e2r_map0))#[mask_sims]
+        e1n_ = ( e1r_map)#[mask_sims]
+        e2n_ = ( e2r_map)#[mask_sims]
+       # idx_ = np.arange(len(mask_sims))[mask_sims]
+    
+        maps_Gower[tomo] =     {'g1_map':g1_map,'g2_map':g2_map,'e1':e1_,'e2':e2_,'e1n':e1n_,'e2n':e2n_,
+                                'e1r_map0_ref':e1r_map0_ref,
+                                'e2r_map0_ref':e2r_map0_ref,
+                                'var_':var_}
+    
+        if do_catalog:
+    
+            cats_Gower = dict()
+            # make a catalog ---------------------------------------------------------------------------------------------------------------------------------
+            SC_per_pixel_correction_noise  = f**2/((np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_)))[pix]
+            
+            # the f**2 applied to g1,g2 is the normalisation missing in the g1_tot,g2_tot ---------------------------------------------------
+            e1_SC = g1_*f**2+es1a*SC_per_pixel_correction_noise
+            e2_SC = g2_*f**2+es2a*SC_per_pixel_correction_noise
+            #e1_SC,e2_SC = addSourceEllipticity({'shear1':g1_,'shear2':g2_},{'e1':es1a*SC_per_pixel_correction_noise,'e2':es2a*SC_per_pixel_correction_noise},es_colnames=("e1","e2"))
+            cats_Gower[tomo] =  {'ra':cats_Euclid[tomo]['ra'],'dec':cats_Euclid[tomo]['dec'],'e1':e1_SC,'e2':e2_SC,'w':cats_Euclid[tomo]['w']}
+        
+        else:
+            cats_Gower = None
+            
+    return maps_Gower, cats_Gower

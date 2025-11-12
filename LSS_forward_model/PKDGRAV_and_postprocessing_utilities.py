@@ -8,7 +8,7 @@ import glob
 import pandas as pd
 import pyarrow.parquet as pq
 import frogress
-
+import astropy.units as u
 
 def build_z_values_file(directory, out_name, out_dir, sims_parameters=None):
     """
@@ -200,8 +200,8 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
         ("fEnvironDensity1", "f4"), ("rHalf", "f4")
     ])
 
-    def fof_path(shell):    return f"{base_dir}run.00{int(shell):03d}.fofstats.0"
-    def pq_path(shell):     return f"{base_dir}run.00{int(shell):03d}.fofstats.parquet"
+    def fof_path(shell):    return f"{base_dir}/run.00{int(shell):03d}.fofstats.0"
+    def pq_path(shell):     return f"{base_dir}/run.00{int(shell):03d}.fofstats.parquet"
 
     for s_idx in frogress.bar(range(len(resume["Step"]))):
         shell = int(resume["Step"][s_idx])
@@ -244,7 +244,7 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
                     df = pd.DataFrame({
                         "halo_center":   halo_center.tolist(),       # list-of-3 float
                         "rmax":          rmax,                        # uint16
-                        "log10M_x1e3":   log10M,                      # uint16
+                        "log10M":   log10M,                      # uint16
                         "inertia_auto":  inertia_auto.tolist(),       # list-of-3 uint16
                         "inertia_cross": inertia_cross.tolist(),      # list-of-3 uint16
                         "angular":       angular.tolist(),            # list-of-3 int16
@@ -266,4 +266,54 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
         except Exception as e:
             print(f"[shell {shell:03d}] error: {e} (left files untouched)")
             continue
-            
+
+
+def delete_snapshot(path_simulation, resume, size_limit_mb=10, dry_run=False):
+    """
+    Delete snapshot files run.00000, run.00001, ... in `path_simulation`
+    unless they are larger than `size_limit_mb` (default 10 MB).
+
+    Returns a dict with lists: deleted, skipped_large, missing, errors.
+    Set dry_run=True to just see what would happen.
+    """
+    size_limit_bytes = int(size_limit_mb * 1024 * 1024)
+
+    deleted = []
+    skipped_large = []
+    missing = []
+    errors = []
+
+    def _3dsnap_path(base_dir, shell):
+        # Original code used glob on a specific filename and took [0].
+        # We'll just build the exact expected path, which is safer.
+        return Path(base_dir) / f"run.{int(shell):05d}"
+
+    for step in resume['Step']:
+        p = _3dsnap_path(path_simulation, step)
+        try:
+            if not p.exists():
+                missing.append(str(p))
+                continue
+            if p.is_dir():
+                errors.append((str(p), "is a directory, not a file"))
+                continue
+
+            size = p.stat().st_size
+            if size > size_limit_bytes:
+                skipped_large.append(str(p))
+                continue
+
+            if not dry_run:
+                p.unlink()
+            deleted.append(str(p))
+
+        except Exception as e:
+            errors.append((str(p), repr(e)))
+
+    return {
+        "deleted": deleted,
+        "skipped_large": skipped_large,
+        "missing": missing,
+        "errors": errors,
+    }
+    
