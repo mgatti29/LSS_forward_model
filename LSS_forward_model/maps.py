@@ -701,7 +701,7 @@ def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
     """
     cosmo = Cosmology.from_camb(camb_pars)
     results = {}
-
+    
     if do_kappa or do_shear:
         conv = glass.lensing.MultiPlaneConvergence(cosmo)
         kappa_list, gamma_list = [], []
