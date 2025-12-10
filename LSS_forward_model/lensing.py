@@ -5,6 +5,8 @@ import pyccl as ccl
 from .maps import F_nla,convert_to_pix_coord,rotate_and_rebin
 import healpy as hp
 
+
+
 def addSourceEllipticity(
     self: "pd.DataFrame",
     es: "pd.DataFrame | np.ndarray",
@@ -160,9 +162,9 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
     sims_parameters.setdefault('rot', 0)
     sims_parameters.setdefault('delta_rot', 0)
 
-    maps_Gower = dict()
+    maps_sim = dict()
     for tomo in range(len(ngal_glass)):
-        maps_Gower[tomo] = dict()
+        maps_sim[tomo] = dict()
 
 
 
@@ -257,14 +259,14 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
         e2n_ = ( e2r_map)#[mask_sims]
        # idx_ = np.arange(len(mask_sims))[mask_sims]
     
-        maps_Gower[tomo] =     {'g1_map':g1_map,'g2_map':g2_map,'e1':e1_,'e2':e2_,'e1n':e1n_,'e2n':e2n_,
+        maps_sim[tomo] =     {'g1_map':g1_map,'g2_map':g2_map,'e1':e1_,'e2':e2_,'e1n':e1n_,'e2n':e2n_,
                                 'e1r_map0_ref':e1r_map0_ref,
                                 'e2r_map0_ref':e2r_map0_ref,
                                 'var_':var_}
     
         if do_catalog:
     
-            cats_Gower = dict()
+            cats_sim = dict()
             # make a catalog ---------------------------------------------------------------------------------------------------------------------------------
             SC_per_pixel_correction_noise  = f**2/((np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_)))[pix]
             
@@ -272,9 +274,9 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
             e1_SC = g1_*f**2+es1a*SC_per_pixel_correction_noise
             e2_SC = g2_*f**2+es2a*SC_per_pixel_correction_noise
             #e1_SC,e2_SC = addSourceEllipticity({'shear1':g1_,'shear2':g2_},{'e1':es1a*SC_per_pixel_correction_noise,'e2':es2a*SC_per_pixel_correction_noise},es_colnames=("e1","e2"))
-            cats_Gower[tomo] =  {'ra':cats_Euclid[tomo]['ra'],'dec':cats_Euclid[tomo]['dec'],'e1':e1_SC,'e2':e2_SC,'w':cats_Euclid[tomo]['w']}
+            cats_sim[tomo] =  {'ra':cats_Euclid[tomo]['ra'],'dec':cats_Euclid[tomo]['dec'],'e1':e1_SC,'e2':e2_SC,'w':cats_Euclid[tomo]['w']}
         
         else:
-            cats_Gower = None
+            cats_sim = None
             
-    return maps_Gower, cats_Gower
+    return maps_sim, cats_sim

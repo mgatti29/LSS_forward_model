@@ -674,6 +674,63 @@ def build_shell_windows_and_partitions(
     return shells, steps, zeff_array, ngal_glass
 
 
+# def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
+#                            do_kappa=True, do_shear=True, do_IA=False):
+#     """
+#     Compute kappa, shear, and/or intrinsic-alignment shear fields
+#     from a set of density shells using glass.lensing.
+
+#     Parameters
+#     ----------
+#     density : list of arrays
+#         Density maps per shell.
+#     shells : list
+#         Corresponding shell window definitions.
+#     camb_pars : dict
+#         CAMB parameters (for Cosmology.from_camb).
+#     nside_maps : int
+#         Healpix nside for the maps.
+#     do_kappa, do_shear, do_IA : bool
+#         Control which fields are returned.
+
+#     Returns
+#     -------
+#     dict
+#         Dictionary containing requested fields among
+#         {"kappa", "gamma", "IA_shear"}.
+#     """
+#     cosmo = Cosmology.from_camb(camb_pars)
+#     results = {}
+    
+#     if do_kappa or do_shear:
+#         conv = glass.lensing.MultiPlaneConvergence(cosmo)
+#         kappa_list, gamma_list = [], []
+#         for ss in frogress.bar(range(len(density))):
+#             conv.add_window(density[ss], shells[ss])
+#             kappa = copy.deepcopy(conv.kappa)
+#             if do_kappa:
+#                 kappa_list.append(kappa)
+#             if do_shear:
+#                 gamma_list.append(glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True))
+#         if do_kappa:
+#             results["kappa"] = np.array(kappa_list)
+#         if do_shear:
+#             results["gamma"] = np.array(gamma_list)
+
+#     if do_IA:
+#         IA_list = []
+#         for ss in frogress.bar(range(len(density))):
+#             IA_list.append(
+#                 glass.lensing.from_convergence(
+#                     density[ss] - np.mean(density[ss]),
+#                     lmax=nside_maps*3-1,
+#                     shear=True
+#                 )
+#             )
+#         results["IA_shear"] = np.array(IA_list)
+
+#     return results
+
 def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
                            do_kappa=True, do_shear=True, do_IA=False):
     """
@@ -704,31 +761,36 @@ def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
     
     if do_kappa or do_shear:
         conv = glass.lensing.MultiPlaneConvergence(cosmo)
-        kappa_list, gamma_list = [], []
+
         for ss in frogress.bar(range(len(density))):
             conv.add_window(density[ss], shells[ss])
             kappa = copy.deepcopy(conv.kappa)
+
             if do_kappa:
-                kappa_list.append(kappa)
+                if ss == 0:
+                    results["kappa"] = np.zeros((len(density),) + kappa.shape, dtype=kappa.dtype)
+                results["kappa"][ss] = kappa
+            
             if do_shear:
-                gamma_list.append(glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True))
-        if do_kappa:
-            results["kappa"] = np.array(kappa_list)
-        if do_shear:
-            results["gamma"] = np.array(gamma_list)
+                gamma = glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True)
+                if ss == 0:
+                    results["gamma"] = np.zeros((len(density),len(gamma),) + gamma[0].shape, dtype=gamma[0].dtype)
+                results["gamma"][ss] = gamma
 
     if do_IA:
-        IA_list = []
+        
         for ss in frogress.bar(range(len(density))):
-            IA_list.append(
-                glass.lensing.from_convergence(
+            
+            IA = glass.lensing.from_convergence(
                     density[ss] - np.mean(density[ss]),
                     lmax=nside_maps*3-1,
                     shear=True
                 )
-            )
-        results["IA_shear"] = np.array(IA_list)
 
+            if ss == 0:
+                results["IA_shear"] = np.zeros((len(density),len(IA),) + IA[0].shape, dtype=IA[0].dtype)
+            results["IA_shear"][ss] = IA
+        
     return results
 
 
