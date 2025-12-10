@@ -456,6 +456,7 @@ def extract_sims_parameters(entry):
         'n_particles': entry['n_particles'],
         'benchmark_type': entry['benchmark_type'].decode('utf-8'),
         'path_par': entry['path_par'].decode('utf-8'),
+        'path_sim': entry['path_sim'].decode('utf-8') if 'path_sim' in entry.dtype.names else None,
         'id_param': entry['id_param'],
         'sobol_index': entry['sobol_index'],
     }
@@ -472,11 +473,11 @@ def load_cosmogrid_params(meta_path, key):
     # Build lookups
     by_delta = {p['delta'].decode('utf-8'): p for p in params_all if p['delta'].decode('utf-8') != 'none'}
     by_path  = {p['path_par'].decode('utf-8').split('/')[-1]: p for p in params_all}
-    by_id    = {int(p['id_param']): p for p in params_all}
+    # by_id    = {i: p for (i, p) in enumerate(params_all)}
 
     # Select the right one
     if isinstance(key, int):
-        entry = by_id[key]
+        entry = params_all[key]
     elif key in by_delta:
         entry = by_delta[key]
     elif key in by_path:
@@ -486,4 +487,29 @@ def load_cosmogrid_params(meta_path, key):
 
     return extract_sims_parameters(entry)
 
-   
+
+def load_cosmogrid_siminfo(meta_path, key):
+    """
+    Load simulation information for a given run key:
+    - key can be a string ('fiducial', 'delta_H0_p', 'cosmo_000001', etc.)
+    - or an integer id_param.
+    """
+    with h5py.File(meta_path, 'r') as f:
+        params_all = f['simulations/all'][:]
+
+    # Build lookups
+    by_delta = {p['delta'].decode('utf-8'): p for p in params_all if p['delta'].decode('utf-8') != 'none'}
+    by_path  = {p['path_par'].decode('utf-8').split('/')[-1]: p for p in params_all}
+    # by_id    = {i: p for (i, p) in enumerate(params_all)}
+
+    # Select the right one
+    if isinstance(key, int):
+        entry = params_all[key]
+    elif key in by_delta:
+        entry = by_delta[key]
+    elif key in by_path:
+        entry = by_path[key]
+    else:
+        raise KeyError(f"Run '{key}' not found in metadata.")
+
+    return extract_sims_parameters(entry)
