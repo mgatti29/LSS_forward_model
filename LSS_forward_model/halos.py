@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import healpy as hp
 import pyccl as ccl
+import copy
 from scipy.interpolate import CubicSpline
 from typing import Optional, Dict
 import frogress
@@ -451,6 +452,7 @@ def load_halo_catalog(
     colossus_pars: [Dict[str, float]],
     sims_parameters: Dict[str, float],
     halo_catalog_log10mass_cut: float,
+    no_calib: True,
 ):
     """
     Load a halo catalog, convert FoF masses to M200c (via Colossus-based calibrator),
@@ -487,12 +489,17 @@ def load_halo_catalog(
     ra, dec = recover_halo_radec(df)
 
     # Convert FoF -> SO (M200c); important for tSZ, neutral for large-scale baryonification
-    interpolator_calib = build_fof_to_m200c_interpolator(
-        sims_parameters, colossus_cosmology)
-    coords = np.column_stack([np.log10(M_fof), z])
-    M200c  = interpolator_calib(coords)
+    if no_calib:
+        print ('no calib')
+        M200c = copy.deepcopy(M_fof)
+    else:
+        print ('extra calib [fof -> SO]')
+        interpolator_calib = build_fof_to_m200c_interpolator(
+            sims_parameters, colossus_cosmology)
+        coords = np.column_stack([np.log10(M_fof), z])
+        M200c  = interpolator_calib(coords)
 
-    # Apply mass cut
+    # Apply mass cut -----------------------------------
     mask = (np.log10(M200c) > halo_catalog_log10mass_cut)
 
     halos = {

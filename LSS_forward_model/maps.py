@@ -112,7 +112,7 @@ def load_or_save_updated_params(path_sim, base_params_path, cache_filename, valu
         for k, v in values_to_update.items():
             sys[k] = float(v)
     bpar = {**base, **sys}
-    np.save(cache_filename, [bpar, sys])
+    np.save(path_sim+cache_filename, [bpar, sys])
     return bpar, sys
 
 
@@ -262,7 +262,6 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,
                     #deconvolve original window function - 
                     p = hp.sphtfunc.pixwin(nside_original)
                     alm_scaled = hp.almxfl(alm, 1/p[: nside_maps*2])
-        
                     d_filtered = hp.alm2map(alm_scaled,nside= nside_maps,pixwin=True)
                     delta.append(d_filtered)
                 else:
@@ -273,7 +272,7 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,
 
     # Add missing shells --------------------
     if len(missing_shells)>0:
-        missing_shells = [shells[np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]
+        missing_shells = [shells[::-1][np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]
         density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
 
         for d in density_to_be_added:
@@ -763,6 +762,8 @@ def load_and_baryonify_gower_st_shells(
     """
     
     if baryons["enabled"]:
+
+        baryons.setdefault('no_calib', True)
         
         bpar, sys = load_or_save_updated_params(path_simulation,baryons['base_params_path'],baryons['filename_new_params'],baryons['values_to_update'], overwrite = False)
         label_baryonification = "baryonified"
@@ -795,6 +796,7 @@ def load_and_baryonify_gower_st_shells(
                 cosmo_bundle['colossus_params'],
                 sims_parameters,
                 baryons['mass_cut'],
+                no_calib = baryons['no_calib'],
             )
             
             make_tsz_and_baryonified_density(
@@ -951,10 +953,12 @@ def make_tsz_and_baryonified_density(
                     counts = np.array(pd.read_parquet(part_path)).astype(np.float32).ravel()
                     
                     nside_original = hp.npix2nside(counts.size) 
-                    p = 1/hp.sphtfunc.pixwin(nside_original)
+                    p = hp.sphtfunc.pixwin(nside_original)
                     alm = hp.map2alm(counts,lmax = nside_maps*2)
                     alm_scaled = hp.almxfl(alm, 1/p[: nside_maps*2])
                     counts = hp.alm2map(alm_scaled,nside= nside_maps,pixwin=True)*(nside_original/nside_maps)**2
+
+                   
                     
                 else:
                     # use provided particl counts
@@ -962,6 +966,7 @@ def make_tsz_and_baryonified_density(
                     
 
                 mask_z = (halos["z"] > zmin) & (halos["z"] < zmax)
+
 
                 if len(halos["z"][mask_z])>1:
                     cdict = {
@@ -1001,7 +1006,7 @@ def make_tsz_and_baryonified_density(
                 
         if len(missing_shells)>0:
  
-            missing_shells = [shells[np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]       
+            missing_shells = [shells[::-1][np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]       
             density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
             for d in density_to_be_added:
                 density.append(d)   
