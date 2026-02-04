@@ -13,7 +13,7 @@ from cosmology import Cosmology
 import copy
 from .halos import *
 import BaryonForge as bfn
-
+import copy
 
 
 
@@ -271,12 +271,15 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,
             missing_shells.append(step)
 
     # Add missing shells --------------------
-    if len(missing_shells)>0:
-        missing_shells = [shells[::-1][np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]
-        density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
-
-        for d in density_to_be_added:
-            delta.append(d)  
+    try:
+        if len(missing_shells)>0:
+            missing_shells = [shells[::-1][np.where(shells_info['Step'] == int(i))[0][0]] for i in missing_shells]
+            density_to_be_added = add_shells(camb_pars,nside_maps = nside_maps,missing_shells = missing_shells)
+    
+            for d in density_to_be_added:
+                delta.append(d)  
+    except:
+        print ('failed adding shells at high redshift ',missing_shells )
     delta = np.array(delta)
     np.save(path_output,delta)
     return delta
@@ -1075,3 +1078,134 @@ def make_tsz_and_baryonified_density(
         density = np.asarray(density, dtype=np.float32)
         np.save(dens_path, density)
 
+
+
+
+
+
+def cmb_lensing_from_glass_plus_gaussian(
+    zeff_glass,
+    density,
+    shells,
+    theory,
+    cosmo_bundle,
+    nside_maps,
+    z_max_born=2.5,
+    diagnostics_lmax=2000,
+    nonlinear=True,
+    seed=None,
+):
+    """
+    Build a CMB lensing convergence map by:
+      (1) multi-plane convergence from simulated shells up to z_max_born using GLASS
+      (2) adding the missing high-z contribution as a Gaussian realization drawn from theory
+
+    Parameters
+    ----------
+    zeff_glass : array-like
+        Effective redshift per shell/window (same ordering as `density` and `shells`).
+    density : sequence of array-like
+        Overdensity maps per shell (HEALPix, length = 12*nside_maps^2).
+    shells : sequence of glass.shells.RadialWindow (or compatible)
+        Windows corresponding to each shell.
+    theory : object
+        Your theory helper with:
+          - theory.results.conformal_time(0), theory.results.tau_maxvis,
+          - theory.results.redshift_at_comoving_radial_distance(chi),
+          - theory.set_Wcmb(),
+          - theory.cl_kk_log(nonlinear=..., zmax=...).
+    cosmo_bundle : dict-like
+        Must contain 'pars_camb' (CAMBparams) used to build glass.Cosmology.
+    nside_maps : int
+        HEALPix NSIDE of the maps.
+    z_max_born : float
+        Max redshift up to which simulated shells are included as “low-z” part.
+    diagnostics_lmax : int
+        Multipole up to which diagnostics ratio is returned (uses hp.anafast output).
+    nonlinear : bool
+        Passed to theory.cl_kk_log.
+    seed : int or None
+        Random seed for synfast (high-z Gaussian completion).
+
+    Returns
+    -------
+    cmb_lensing_map : np.ndarray
+        Final kappa map = kappa_lowz + Gaussian completion, shape (12*nside_maps^2,).
+    diagnostics : np.ndarray
+        Ratio (Cl_measured / (Cl_theory_lowz * pixwin^2)) for ell < diagnostics_lmax.
+    meta : dict
+        Useful bookkeeping: imax, z_cmb, z_cut_used, cl_z_max, cl_full, cl_missing.
+    """
+    zeff_glass = np.asarray(zeff_glass, dtype=float)
+    npix = 12 * nside_maps**2
+
+    if len(density) != len(shells) or len(density) != len(zeff_glass):
+        raise ValueError("density, shells, and zeff_glass must have the same length.")
+
+    # --- CMB distance/redshift from CAMB results
+    chi_cmb = theory.results.conformal_time(0) - theory.results.tau_maxvis
+    z_cmb = float(theory.results.redshift_at_comoving_radial_distance(chi_cmb))
+
+    # --- choose last shell index included in the low-z part
+    idx = np.where(zeff_glass > z_max_born)[0]
+    if len(idx) == 0:
+        raise ValueError(f"No shell has zeff > z_max_born={z_max_born}. Increase z_max_born?")
+    imax = int(idx[0])
+
+    # --- GLASS multipane convergence up to z_max_born, then propagate to source at z_cmb
+    cosmo = Cosmology.from_camb(cosmo_bundle["pars_camb"])
+    conv = glass.lensing.MultiPlaneConvergence(cosmo)
+
+    for ss in range(imax + 1):
+        m = np.asarray(density[ss], dtype=np.float64)
+        if m.size != npix:
+            raise ValueError(
+                f"density[{ss}] has size {m.size}, expected {npix} for nside={nside_maps}."
+            )
+        conv.add_window(m, shells[ss])
+
+    conv.add_plane(np.zeros(npix, dtype=np.float64), z_cmb)
+    kappa_lowz = np.asarray(conv.kappa, dtype=np.float64)
+
+    # --- theory spectra: low-z truncated and full to CMB
+    theory.set_Wcmb()
+    z_cut_used = float(zeff_glass[imax])  # keep consistent with your current convention
+
+    cl_z_max = np.asarray(theory.cl_kk_log(nonlinear=nonlinear, zmax=z_cut_used), dtype=float)
+    cl_full  = np.asarray(theory.cl_kk_log(nonlinear=nonlinear, zmax=z_cmb), dtype=float)
+
+    # --- diagnostics: compare measured low-z Cl to theory low-z Cl (incl pixel window)
+    cl_ref = hp.anafast(kappa_lowz)
+    ell_max_diag = min(diagnostics_lmax, len(cl_ref), len(cl_z_max), len(hp.pixwin(nside_maps)) )
+
+    cl_pix = hp.pixwin(nside_maps)
+    diagnostics = cl_ref[:ell_max_diag] / (cl_z_max[:ell_max_diag] * cl_pix[:ell_max_diag] ** 2)
+
+    # --- missing high-z contribution (clip negatives to avoid synfast issues)
+    cl_missing = cl_full - cl_z_max
+    cl_missing = np.clip(cl_missing, 0.0, None)
+
+    # healpy synfast expects C_ell starting at ell=0
+    if cl_missing[0] != 0.0:
+        # Your spectra may start at ell=1; force ell=0 to zero safely
+        cl_missing = np.asarray(cl_missing)
+        if cl_missing.shape[0] > 0:
+            cl_missing[0] = 0.0
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    kappa_hi = hp.synfast(cl_missing, nside_maps, new=True)
+    cmb_lensing_map = kappa_lowz + kappa_hi
+
+    meta = dict(
+        imax=imax,
+        z_cmb=z_cmb,
+        chi_cmb=float(chi_cmb),
+        z_cut_used=z_cut_used,
+        cl_z_max=cl_z_max,
+        cl_full=cl_full,
+        cl_missing=cl_missing,
+    )
+
+    return cmb_lensing_map, diagnostics, meta
