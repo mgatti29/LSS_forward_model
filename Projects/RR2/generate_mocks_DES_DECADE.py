@@ -22,9 +22,42 @@ from LSS_forward_model.theory import LimberTheory
 
 def run(path_simulation, rots, delta_rots ,noise_rels):
 
-  #  print (path_simulation,)
-    SC_corrections = np.load('/global/homes/m/mgatti/LSS_forward_model/Data/SC_RR2_fit_nov6.npy',allow_pickle =True).item()
-    
+
+    # nuisance parameters --------------------------------------------------------
+    dz = np.random.normal(dz_mean,dz_spread)
+    dm = np.random.normal(dm_mean,dm_spread)
+    A_IA = np.random.uniform(A0_interval[0],A0_interval[1])
+    eta_IA = np.random.uniform(eta_interval[0],eta_interval[1])
+    bias_sc = [np.random.uniform(bias_SC_interval[0],bias_SC_interval[1]) for tomo in range(len(dz_mean))]
+
+    sims_parameters['dz'] = dz
+    sims_parameters['dm'] = dm
+    sims_parameters['A_IA'] = A_IA
+    sims_parameters['eta_IA'] = eta_IA
+    sims_parameters['bias_sc'] = bias_sc
+
+    if type_ =='DESY6':
+        SC_corrections = np.load('../../Data/SC_DES.npy',allow_pickle =True).item()
+        if (run_type == 'covariance') or  (run_type == 'derivatives'):
+            nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_DESY6.npy',allow_pickle=True).item()
+        else:
+            m = np.load('/global/cfs/cdirs/m5099/DESY3/20k_m_nz_realizations.npz')
+            idx_rel = np.random.randint(0,20000,1)[0]
+            sims_parameters['dm'] = 1.+m['ms'][:,idx_rel]
+            nz_RR2 = dict()
+            nz_RR2['z_rebinned'] = np.arange(0,3,0.01)
+            nz_RR2['nz_rebinned'] = m['nzs'][idx_rel]
+            nz_RR2['nz_rebinned'][:,-1] = 0.
+            sims_parameters['idx_rel_nz'] = idx_rel
+
+    elif type_ =='NGC':
+        SC_corrections = np.load('../../Data/SC_NGC.npy',allow_pickle =True).item()
+        nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_NGC.npy',allow_pickle=True).item()
+       
+    elif type_ =='SGC':
+        SC_corrections = np.load('../../Data/SC_SGC.npy',allow_pickle =True).item()
+        nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_SGC.npy',allow_pickle=True).item()
+            
 
     if True:
     #if not os.path.exists(path_maps_gower):        
@@ -37,22 +70,11 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
             bpar, sys = load_or_save_updated_params(path_simulation,baryons['base_params_path'],baryons['filename_new_params'],baryons['values_to_update'], overwrite = False)
             sims_parameters.update(sys)
 
-        # nuisance parameters --------------------------------------------------------
-        dz = np.random.normal(dz_mean,dz_spread)
-        dm = np.random.normal(dm_mean,dm_spread)
-        A_IA = np.random.uniform(A0_interval[0],A0_interval[1])
-        eta_IA = np.random.uniform(eta_interval[0],eta_interval[1])
-        bias_sc = [np.random.uniform(bias_SC_interval[0],bias_SC_interval[1]) for tomo in range(len(dz_mean))]
-        sims_parameters['dz'] = dz
-        sims_parameters['dm'] = dm
-        sims_parameters['A_IA'] = A_IA
-        sims_parameters['eta_IA'] = eta_IA
-        sims_parameters['bias_sc'] = bias_sc
+
 
     
         # load n(z) --------------------------------------------------------------------
-        nz_RR2 = np.load('/global/cfs/cdirs/m5099/RR2/Reg2_SHE_tombins_unitweights_nz_SOMbin_C2020z_rebinned.npy',allow_pickle=True).item()
-        
+ 
         nz_shifted, shells, steps, zeff_glass, ngal_glass = apply_nz_shifts_and_build_shells(
             z_rebinned=nz_RR2['z_rebinned'],
             nz_all=nz_RR2['nz_rebinned'],
@@ -114,7 +136,17 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
                             sims_parameters['delta_rot'] = copy.deepcopy(delta_rot)
                             print ('making maps - ',path_maps_gower)
                             # make RR2 mocks
-                            path_data_cats = '/global/cfs/cdirs/m5099/RR2/Euclid_cats.npy'
+
+                            
+                            if type_ == 'NGC':
+                                path_data_cats ='/global/cfs/cdirs/m5099/DESY3/DECADE_NGC.npy'
+                            elif type_ == 'SGC':
+                                path_data_cats='/global/cfs/cdirs/m5099/DESY3/DECADE_SGC.npy'
+                            elif type_ == 'DESY6':
+                                path_data_cats='/global/cfs/cdirs/m5099/DESY3/DESY6.npy'
+                            
+                                
+                            
                             cats_Euclid  = np.load(path_data_cats,allow_pickle=True).item()
                             maps_Gower_WL,_ = make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_maps, fields, cats_Euclid, SC_corrections = SC_corrections, do_catalog = False, include_SC = True,compact_savings = True)
                     
@@ -128,28 +160,46 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
 
 if __name__ == '__main__':
 
-    run_type = 'covariance'
+    do_maps = True
+    nside_maps = 1024
+    tomo_bins = [0,1,2,3]
+    
+    experiment = 'DESY6' #  'NGC', 'SGC'
+
+    if experiment == 'DESY6':
+        dz_mean = [0,0,0,0,0]
+        dz_spread = [0.,0.,0.,0.]
+        dm_mean = 1.+np.array([-0.00343755,  0.0064513 ,  0.01591432,  0.00162992])
+        dm_spread = [0.00296,0.00421,0.00428,0.00462]
+    
+
+    if experiment == 'SGC':
+        dz_mean = [0,0,0,0,0]
+        dz_spread = [0.016,0.014,0.010,0.0116]
+        dm_mean = 1.+np.array([-1.33,-2.26,-3.67,-5.72])*0.01
+        dm_spread = [0.00472,0.004657,0.00697,0.00804]
+
+    if experiment == 'NGC':
+        dz_mean = [0,0,0,0,0]
+        dz_spread = [0.016,0.0139,0.0101,0.0117]
+        dm_mean = 1.+np.array([-0.92,-1.9,4.0,-3.73])*0.01
+        dm_spread = [0.00296,0.00421,0.00428,0.00462]
+    
+
+
 
     ########################################################################################################################################
     # covariance run ------------------------------------------------------------------------------------------------------------------------
 
     if run_type == 'covariance':
-        do_maps = True
-        nside_maps = 1024
+
         
-        tomo_bins = [1,2,3,4,5,6]
+        
         delta_rot_ = [0]
-    
-        
-        dz_mean = [0,0,0,0,0,0,0]
-        dz_spread = [0,0,0,0,0,0,0]
-        
-        dm_mean = [1,1,1,1,1,1,1]
-        dm_spread = [0,0,0,0,0,0,0]
-        
+        dz_spread = [0,0,0,0]
+        dm_spread = [0,0,0,0]
         A0_interval  = [0,0]
         eta_interval = [0,0]
-        
         bias_SC_interval = [1,1]
         
         baryons = {
@@ -237,22 +287,15 @@ if __name__ == '__main__':
 
     elif run_type == 'derivatives':
         
-        nside_maps = 1024
         
-        tomo_bins = [1,2,3,4,5,6]
         delta_rot_ = [0]
-    
-        
-        dz_mean = [0,0,0,0,0,0,0]
-        dz_spread = [0,0,0,0,0,0,0]
-        
-        dm_mean = [1,1,1,1,1,1,1]
-        dm_spread = [0,0,0,0,0,0,0]
-        
+        dz_spread = [0,0,0,0]
+        dm_spread = [0,0,0,0]
         A0_interval  = [0,0]
         eta_interval = [0,0]
-        
         bias_SC_interval = [1,1]
+
+        
         
         baryons = {
                 "enabled": False,
@@ -415,17 +458,7 @@ if __name__ == '__main__':
         
         ########################################################################################################################################
         # general run ------------------------------------------------------------------------------------------------------------------------
-        do_maps = True
-        nside_maps = 1024
-        tomo_bins = [1,2,3,4,5,6]
-        
-        
-        dz_mean = [0,0,0,0,0,0,0]
-        dz_spread = [0.01,0.01,0.01,0.01,0.01,0.01,0.01]
-        
-        dm_mean = [1,1,1,1,1,1,1]
-        dm_spread = [0.05,0.05,0.05,0.05,0.05,0.05,0.05]
-        
+
         A0_interval  = [-2.5,2.5]
         eta_interval = [-2.5,2.5]
         
