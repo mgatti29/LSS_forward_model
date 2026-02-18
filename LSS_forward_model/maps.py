@@ -247,9 +247,13 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,
     for iii in frogress.bar(range(len(shells_info['Step']))):
         try:            
             step = shells_info['Step'][::-1][iii]
-            path = path_simulation + '/particles_{0}_4096.parquet'.format(int(step))
-            counts = np.array(pd.read_parquet(path)).flatten()
 
+            try:
+                path = path_simulation + '/particles_{0}_4096.parquet'.format(int(step))
+                counts = np.array(pd.read_parquet(path)).flatten()
+            except:
+                path = path_simulation + '/run.{:05d}.lightcone.npy'.format(int(step))
+                counts = np.load(path)*1.                
             nside_original = hp.npix2nside(counts.size) 
             
             if np.sum(counts) == 0:
@@ -268,6 +272,7 @@ def make_density_maps(shells_info,path_simulation,path_output,nside_maps,shells,
                     d = counts/np.mean(counts)-1
                     delta.append(d)
         except:
+            print ('missing shell -  ',step)
             missing_shells.append(step)
 
     # Add missing shells --------------------
@@ -1014,8 +1019,12 @@ def make_tsz_and_baryonified_density(
 
                 if particles is None:
                     # read it from Gower St format ---------
-                    part_path = os.path.join(path_simulation, f"particles_{int(step)}_4096.parquet")
-                    counts = np.array(pd.read_parquet(part_path)).astype(np.float32).ravel()
+                    try:
+                        path = path_simulation + '/particles_{0}_4096.parquet'.format(int(step))
+                        counts = np.array(pd.read_parquet(path)).flatten()
+                    except:
+                        path = path_simulation + '/run.{:05d}.lightcone.npy'.format(int(step))
+                        counts = np.load(path)*1.                
                     
                     nside_original = hp.npix2nside(counts.size) 
                     p = hp.sphtfunc.pixwin(nside_original)
