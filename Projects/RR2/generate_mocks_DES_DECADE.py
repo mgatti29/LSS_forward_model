@@ -117,20 +117,20 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
                 for experiment in experiments:
                             
                     if experiment == 'DESY6':
-                        dz_mean = [0,0,0,0,0]
+                        dz_mean = [0,0,0,0]
                         dz_spread = [0.,0.,0.,0.]
                         dm_mean = 1.+np.array([-0.00343755,  0.0064513 ,  0.01591432,  0.00162992])
                         dm_spread = [0.00296,0.00421,0.00428,0.00462]
 
 
                     if experiment == 'SGC':
-                        dz_mean = [0,0,0,0,0]
+                        dz_mean = [0,0,0,0]
                         dz_spread = [0.016,0.014,0.010,0.0116]
                         dm_mean = 1.+np.array([-1.33,-2.26,-3.67,-5.72])*0.01
                         dm_spread = [0.00472,0.004657,0.00697,0.00804]
 
                     if experiment == 'NGC':
-                        dz_mean = [0,0,0,0,0]
+                        dz_mean = [0,0,0,0]
                         dz_spread = [0.016,0.0139,0.0101,0.0117]
                         dm_mean = 1.+np.array([-0.92,-1.9,4.0,-3.73])*0.01
                         dm_spread = [0.00296,0.00421,0.00428,0.00462]
@@ -181,13 +181,23 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
                         nz_RR2['z_rebinned'] =np.linspace(0,6,300)
                         nz_RR2['nz_rebinned'] = np.array([np.ones(300)]) 
 
+
+                    
+                    nz_shifted, shells, steps, zeff_glass, ngal_glass = apply_nz_shifts_and_build_shells(
+                        z_rebinned=nz_RR2['z_rebinned'],
+                        nz_all=nz_RR2['nz_rebinned'],
+                        dz_values=sims_parameters["dz"],
+                        shells_info=shells_info,
+                    )
+
+
                     # ------------------------------------------------------------------------------------------------   
                     if baryons['enabled']:
                         label_baryonification = 'baryonified_{0}'.format(noise_rel)
-                        path_maps_gower = str(path_simulation)+'/maps_Gower_baryonified_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
+                        path_maps_gower = str(path_simulation)+'/maps_Gower_baryonified_{0}_{1}_{2}_{3}.npy'.format(rot,delta_rot,noise_rel,experiment)
                     else:
                         label_baryonification = 'normal'
-                        path_maps_gower = str(path_simulation)+'/maps_Gower_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
+                        path_maps_gower = str(path_simulation)+'/maps_Gower_{0}_{1}_{2}_{3}.npy'.format(rot,delta_rot,noise_rel,experiment)
 
 
                     if not os.path.exists(path_maps_gower):
@@ -197,11 +207,11 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
                         # make RR2 mocks
 
 
-                        if type_ == 'NGC':
+                        if experiment == 'NGC':
                             path_data_cats ='/global/cfs/cdirs/m5099/DESY3/DECADE_NGC.npy'
-                        elif type_ == 'SGC':
+                        elif experiment == 'SGC':
                             path_data_cats='/global/cfs/cdirs/m5099/DESY3/DECADE_SGC.npy'
-                        elif type_ == 'DESY6':
+                        elif experiment == 'DESY6':
                             path_data_cats='/global/cfs/cdirs/m5099/DESY3/DESY6.npy'
 
 
@@ -460,7 +470,7 @@ if __name__ == '__main__':
             for rot in rots:
                 for noise_rel in noise_rels:
                     for delta_rot in delta_rots:
-                        if baryons['enabled']:
+                        if baryons['enabled']:    
                             label_baryonification = 'baryonified_{0}'.format(noise_rel)
                             path_maps_gowerp = str(pathp)+'/maps_Gower_baryonified_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
                             path_maps_gowerm = str(pathm)+'/maps_Gower_baryonified_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
@@ -532,24 +542,18 @@ if __name__ == '__main__':
             else:
                 done += 1
 
-        '''
+        #'''
         for path in have:
             missing_any = False
             delta_exist = True
             for rot in rots:
                 for noise_rel in noise_rels:
                     for delta_rot in delta_rots:
-                 	
-			   
-                        if baryons['enabled']:
+                        #if True:
+                        if True:
                             label_baryonification = 'baryonified_{0}'.format(noise_rel)
-                            path_maps_gower = str(path)+'/maps_Gower_baryonified_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
-                        else:
-                            label_baryonification = 'normal'
-                            path_maps_gower = str(path)+'/maps_Gower_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
-                        
-				
-            			if not os.path.exists(path_maps_gower):
+                            path_maps_gower = str(path)+'/maps_Gower_baryonified_{0}_{1}_{2}_{3}.npy'.format(rot,delta_rot,noise_rel,experiments[-1])
+                        if not os.path.exists(path_maps_gower):
                             if  os.path.exists(str(path)+'/delta_b_1024_{0}.npy'.format(noise_rel)):
                                 runs.append([str(path)+'/',rots,delta_rots, noise_rels])
                
@@ -565,7 +569,7 @@ if __name__ == '__main__':
             if not missing_any:
                 if delta_exist:
                     done+=1    
-    	'''
+    	#'''
         print ('RUNSTODO: ',len(runs),'RUNS DONE: ',done)
         
         comm = MPI.COMM_WORLD
