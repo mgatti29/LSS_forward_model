@@ -22,68 +22,43 @@ from LSS_forward_model.theory import LimberTheory
 
 def run(path_simulation, rots, delta_rots ,noise_rels):
 
+    sims_parameters, cosmo_bundle = read_sims_params(path_simulation)
 
-    # nuisance parameters --------------------------------------------------------
-    dz = np.random.normal(dz_mean,dz_spread)
-    dm = np.random.normal(dm_mean,dm_spread)
-    A_IA = np.random.uniform(A0_interval[0],A0_interval[1])
-    eta_IA = np.random.uniform(eta_interval[0],eta_interval[1])
-    bias_sc = [np.random.uniform(bias_SC_interval[0],bias_SC_interval[1]) for tomo in range(len(dz_mean))]
-
-    sims_parameters['dz'] = dz
-    sims_parameters['dm'] = dm
-    sims_parameters['A_IA'] = A_IA
-    sims_parameters['eta_IA'] = eta_IA
-    sims_parameters['bias_sc'] = bias_sc
-
-    if type_ =='DESY6':
-        SC_corrections = np.load('../../Data/SC_DES.npy',allow_pickle =True).item()
-        if (run_type == 'covariance') or  (run_type == 'derivatives'):
-            nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_DESY6.npy',allow_pickle=True).item()
-        else:
-            m = np.load('/global/cfs/cdirs/m5099/DESY3/20k_m_nz_realizations.npz')
-            idx_rel = np.random.randint(0,20000,1)[0]
-            sims_parameters['dm'] = 1.+m['ms'][:,idx_rel]
-            nz_RR2 = dict()
-            nz_RR2['z_rebinned'] = np.arange(0,3,0.01)
-            nz_RR2['nz_rebinned'] = m['nzs'][idx_rel]
-            nz_RR2['nz_rebinned'][:,-1] = 0.
-            sims_parameters['idx_rel_nz'] = idx_rel
-
-    elif type_ =='NGC':
-        SC_corrections = np.load('../../Data/SC_NGC.npy',allow_pickle =True).item()
-        nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_NGC.npy',allow_pickle=True).item()
-       
-    elif type_ =='SGC':
-        SC_corrections = np.load('../../Data/SC_SGC.npy',allow_pickle =True).item()
-        nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_SGC.npy',allow_pickle=True).item()
-            
-
-    if True:
-    #if not os.path.exists(path_maps_gower):        
-        # get basic info -------------------------------------------------------------
-        sims_parameters, cosmo_bundle = read_sims_params(path_simulation)    
-        shells_info = recover_shell_info(path_simulation+'/z_values.txt', max_z=49)
     
+    
+    
+    
+
+    shells_info = recover_shell_info(path_simulation+'/z_values.txt', max_z=49)
+    print (noise_rels)
+    for noise_rel in noise_rels:
+        
+        if run_type == 'normal':
+            baryons = {
+            "enabled": True,
+            "max_z_halo_catalog": 1,
+            "mass_cut": 13.2,
+            "do_tSZ": False,
+            "base_params_path": "../../Data/Baryonification_default_parameters.npy",
+            "filename_new_params": "sys_baryo_{0}.npy".format(noise_rel)}
+
+            baryon_priors =   {"M_c": (12.5, 15.5, "log10"),   "theta_ej": (3.0, 10.0, "lin"),    "eta": (-2.0, -0.1, "log10")}
+
         if baryons['enabled']:
             baryons[ "values_to_update"] = draw_params_from_specs(baryon_priors)
             bpar, sys = load_or_save_updated_params(path_simulation,baryons['base_params_path'],baryons['filename_new_params'],baryons['values_to_update'], overwrite = False)
             sims_parameters.update(sys)
 
+            tsz_path = os.path.join(path_simulation, f"tsz_{nside_maps}_{noise_rel}.npy")
+            dens_path = os.path.join(path_simulation, f"delta_b_{nside_maps}_{noise_rel}.npy")
+        else:
+            dens_path = os.path.join(path_simulation, f"delta_{nside_maps}.npy")
 
 
     
-        # load n(z) --------------------------------------------------------------------
+        # shells --------------------------------------------------------------------
+        shells, steps, zeff_array = build_shells(shells_info)
  
-        nz_shifted, shells, steps, zeff_glass, ngal_glass = apply_nz_shifts_and_build_shells(
-            z_rebinned=nz_RR2['z_rebinned'],
-            nz_all=nz_RR2['nz_rebinned'],
-            dz_values=sims_parameters["dz"],
-            shells_info=shells_info,
-        )
-
-
-
         # density field ---------------------
         print ('computing density fields')
         density, label_baryonification = load_and_baryonify_gower_st_shells(
@@ -94,12 +69,13 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
             nside_maps,
             shells_info,
             shells,
-            overwrite_baryonified_shells = False)
+            overwrite_baryonified_shells = False,
+            dens_path = dens_path,
+            tsz_path = tsz_path
+        )
 
 
-
-
-
+    if do_maps:
         print ('computing lensing fields')
         # shear field ------------------------------------------------------------------------------------------------
         fields = compute_lensing_fields(density, shells, cosmo_bundle['pars_camb'], nside_maps, do_kappa=True, do_shear=True, do_IA=True)
@@ -117,84 +93,144 @@ def run(path_simulation, rots, delta_rots ,noise_rels):
         np.save(path_simulation+'theory_checks.npy',{'ratio':ratio,'Cls':Cls[:, :2000],'theory':Cgg[:, :, :2000]})
         '''
 
-        if do_maps:
+        
+        
+        
+        
+        for rot in rots:  
+            for delta_rot in delta_rots:
+        
+                # setup IA parameters ---------------------------------------------------------------------------
+                IA_parameters_path = os.path.join(path_simulation, f"IA_params_{nside_maps}_{rot}_{delta_rot}.npy")
+                if os.path.exists(IA_parameters_path):
+                    mute_params = np.load(IA_parameters_path,allow_pickle=True).item()
+                    sims_parameters['A_IA'] = copy.deepcopy(mute_params['A_IA'])
+                    sims_parameters['eta_IA'] = copy.deepcopy(mute_params['eta_IA'])  
+                else:
+                    A_IA = np.random.uniform(A0_interval[0],A0_interval[1])
+                    eta_IA = np.random.uniform(eta_interval[0],eta_interval[1])
+                    sims_parameters['A_IA'] = A_IA 
+                    sims_parameters['eta_IA'] = eta_IA  
+                    np.save(IA_parameters_path,{'A_IA':A_IA,'eta_IA':eta_IA})
 
-            for rot in rots:
-                for noise_rel in noise_rels:
-                    for delta_rot in delta_rots:
-                    
-                        if baryons['enabled']:
-                            label_baryonification = 'baryonified_{0}'.format(noise_rel)
-                            path_maps_gower = str(path_simulation)+'/maps_Gower_baryonified_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
+
+                for experiment in experiments:
+                            
+                    if experiment == 'DESY6':
+                        dz_mean = [0,0,0,0,0]
+                        dz_spread = [0.,0.,0.,0.]
+                        dm_mean = 1.+np.array([-0.00343755,  0.0064513 ,  0.01591432,  0.00162992])
+                        dm_spread = [0.00296,0.00421,0.00428,0.00462]
+
+
+                    if experiment == 'SGC':
+                        dz_mean = [0,0,0,0,0]
+                        dz_spread = [0.016,0.014,0.010,0.0116]
+                        dm_mean = 1.+np.array([-1.33,-2.26,-3.67,-5.72])*0.01
+                        dm_spread = [0.00472,0.004657,0.00697,0.00804]
+
+                    if experiment == 'NGC':
+                        dz_mean = [0,0,0,0,0]
+                        dz_spread = [0.016,0.0139,0.0101,0.0117]
+                        dm_mean = 1.+np.array([-0.92,-1.9,4.0,-3.73])*0.01
+                        dm_spread = [0.00296,0.00421,0.00428,0.00462]
+                    else:
+                        dz_mean = [0.]
+                        dz_spread = [0]
+                        dm_mean = [1.]
+                        dm_spread = [0.]
+       
+        
+        
+        
+                    # nuisance parameters --------------------------------------------------------
+                    dz = np.random.normal(dz_mean,dz_spread)
+                    dm = np.random.normal(dm_mean,dm_spread)    
+                    bias_sc = [np.random.uniform(bias_SC_interval[0],bias_SC_interval[1]) for tomo in range(len(dz_mean))]
+
+
+                    sims_parameters['dz'] = dz
+                    sims_parameters['dm'] = dm
+                    sims_parameters['bias_sc'] = bias_sc
+                            
+                           
+                    if experiment =='DESY6':
+                        SC_corrections = np.load('../../Data/SC_DES.npy',allow_pickle =True).item()
+                        if (run_type == 'covariance') or  (run_type == 'derivatives'):
+                            nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_DESY6.npy',allow_pickle=True).item()
                         else:
-                            label_baryonification = 'normal'
-                            path_maps_gower = str(path_simulation)+'/maps_Gower_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
+                            m = np.load('/global/cfs/cdirs/m5099/DESY3/20k_m_nz_realizations.npz')
+                            idx_rel = np.random.randint(0,20000,1)[0]
+                            sims_parameters['dm'] = 1.+m['ms'][:,idx_rel]
+                            nz_RR2 = dict()
+                            nz_RR2['z_rebinned'] = np.arange(0,3,0.01)
+                            nz_RR2['nz_rebinned'] = m['nzs'][idx_rel]
+                            nz_RR2['nz_rebinned'][:,-1] = 0.
+                            sims_parameters['idx_rel_nz'] = idx_rel
+
+                    elif experiment =='NGC':
+                        SC_corrections = np.load('../../Data/SC_NGC.npy',allow_pickle =True).item()
+                        nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_NGC.npy',allow_pickle=True).item()
+
+                    elif experiment =='SGC':
+                        SC_corrections = np.load('../../Data/SC_SGC.npy',allow_pickle =True).item()
+                        nz_RR2 = np.load('/global/cfs/cdirs/m5099/DESY3/nz_SGC.npy',allow_pickle=True).item()
+                    else:
+                        print ('no actual data selected')
+                        nz_RR2 = dict()
+                        nz_RR2['z_rebinned'] =np.linspace(0,6,300)
+                        nz_RR2['nz_rebinned'] = np.array([np.ones(300)]) 
+
+                    # ------------------------------------------------------------------------------------------------   
+                    if baryons['enabled']:
+                        label_baryonification = 'baryonified_{0}'.format(noise_rel)
+                        path_maps_gower = str(path_simulation)+'/maps_Gower_baryonified_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
+                    else:
+                        label_baryonification = 'normal'
+                        path_maps_gower = str(path_simulation)+'/maps_Gower_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
 
 
-                        if not os.path.exists(path_maps_gower):
-                            sims_parameters['rot'] = copy.deepcopy(rot)
-                            sims_parameters['delta_rot'] = copy.deepcopy(delta_rot)
-                            print ('making maps - ',path_maps_gower)
-                            # make RR2 mocks
+                    if not os.path.exists(path_maps_gower):
+                        sims_parameters['rot'] = copy.deepcopy(rot)
+                        sims_parameters['delta_rot'] = copy.deepcopy(delta_rot)
+                        print ('making maps - ',path_maps_gower)
+                        # make RR2 mocks
 
-                            
-                            if type_ == 'NGC':
-                                path_data_cats ='/global/cfs/cdirs/m5099/DESY3/DECADE_NGC.npy'
-                            elif type_ == 'SGC':
-                                path_data_cats='/global/cfs/cdirs/m5099/DESY3/DECADE_SGC.npy'
-                            elif type_ == 'DESY6':
-                                path_data_cats='/global/cfs/cdirs/m5099/DESY3/DESY6.npy'
-                            
-                                
-                            
-                            cats_Euclid  = np.load(path_data_cats,allow_pickle=True).item()
-                            maps_Gower_WL,_ = make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_maps, fields, cats_Euclid, SC_corrections = SC_corrections, do_catalog = False, include_SC = True,compact_savings = True)
-                    
-                    
-                            # save mock
-                            maps_Gower_WL['sims_parameters'] = copy.deepcopy(sims_parameters)
-                            np.save(path_maps_gower,maps_Gower_WL)
-                            print ('DONE making maps - ',path_maps_gower)
+
+                        if type_ == 'NGC':
+                            path_data_cats ='/global/cfs/cdirs/m5099/DESY3/DECADE_NGC.npy'
+                        elif type_ == 'SGC':
+                            path_data_cats='/global/cfs/cdirs/m5099/DESY3/DECADE_SGC.npy'
+                        elif type_ == 'DESY6':
+                            path_data_cats='/global/cfs/cdirs/m5099/DESY3/DESY6.npy'
+
+
+
+                        cats_Euclid  = np.load(path_data_cats,allow_pickle=True).item()
+                        maps_Gower_WL,_ = make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_maps, fields, cats_Euclid, SC_corrections = SC_corrections, do_catalog = False, include_SC = True,compact_savings = True)
+
+
+                        # save mock
+                        maps_Gower_WL['sims_parameters'] = copy.deepcopy(sims_parameters)
+                        np.save(path_maps_gower,maps_Gower_WL)
+                print ('DONE making maps - ',path_maps_gower)
 
 
 
 if __name__ == '__main__':
-
+    run_type = 'normal'
     do_maps = True
     nside_maps = 1024
     tomo_bins = [0,1,2,3]
     
-    experiment = 'DESY6' #  'NGC', 'SGC'
-
-    if experiment == 'DESY6':
-        dz_mean = [0,0,0,0,0]
-        dz_spread = [0.,0.,0.,0.]
-        dm_mean = 1.+np.array([-0.00343755,  0.0064513 ,  0.01591432,  0.00162992])
-        dm_spread = [0.00296,0.00421,0.00428,0.00462]
-    
-
-    if experiment == 'SGC':
-        dz_mean = [0,0,0,0,0]
-        dz_spread = [0.016,0.014,0.010,0.0116]
-        dm_mean = 1.+np.array([-1.33,-2.26,-3.67,-5.72])*0.01
-        dm_spread = [0.00472,0.004657,0.00697,0.00804]
-
-    if experiment == 'NGC':
-        dz_mean = [0,0,0,0,0]
-        dz_spread = [0.016,0.0139,0.0101,0.0117]
-        dm_mean = 1.+np.array([-0.92,-1.9,4.0,-3.73])*0.01
-        dm_spread = [0.00296,0.00421,0.00428,0.00462]
-    
-
-
+    experiments = ['DESY6','NGC', 'SGC']
 
     ########################################################################################################################################
     # covariance run ------------------------------------------------------------------------------------------------------------------------
 
     if run_type == 'covariance':
 
-        
-        
+
         delta_rot_ = [0]
         dz_spread = [0,0,0,0]
         dm_spread = [0,0,0,0]
@@ -465,53 +501,57 @@ if __name__ == '__main__':
         bias_SC_interval = [0.5,1.5]
         
      
-    
-    
-        baryons = {
-                "enabled": True,
-                "max_z_halo_catalog": 1,
-                "mass_cut": 13.2,   
-                "do_tSZ": False,
-                "base_params_path": "../../Data/Baryonification_default_parameters.npy",
-                "filename_new_params": "sys_baryo_0.npy"}
-    
-        
-        baryon_priors =   {"M_c": (12.5, 15.5, "log10"),   "theta_ej": (3.0, 10.0, "lin"),    "eta": (-2.0, -0.1, "log10")}
-        #baryons[ "values_to_update"] = draw_params_from_specs(baryon_priors)
-        
-        
         
     
+        BASE = Path("/share/rcifdata/mgatti/mocks/runsV/")
+        TARGET = "run.00100.lightcone.npy"
+                            
         BASE = Path("/global/cfs/cdirs/m5099/GowerSt2/runsU")
         TARGET = "particles_100_4096.parquet"
+
+    
+        BASE = Path("/global/cfs/cdirs/m5099/GowerSt2/Lorne_runs/runsU/")
+        TARGET = "run.00100.lightcone.npy"
+                            
+                            
         have = sorted(p for p in BASE.glob("run*/") if (p / TARGET).is_file())
         missing = sorted(set(BASE.glob("run*/")) - set(have))
     
         done = 0 
+        
         runs = []
 
         rots = [0,1,2,3]
         noise_rels =  [0]
         delta_rots = [0]
         
-        
+        # this make sure you have at least one density real + halo catalog 
+        for path in have:
+            if not os.path.exists(str(path)+'/delta_b_1024_0.npy'):
+                runs.append([str(path)+'/',rots,delta_rots, noise_rels])
+            else:
+                done += 1
+
+        '''
         for path in have:
             missing_any = False
             delta_exist = True
             for rot in rots:
                 for noise_rel in noise_rels:
                     for delta_rot in delta_rots:
-                    
+                 	
+			   
                         if baryons['enabled']:
                             label_baryonification = 'baryonified_{0}'.format(noise_rel)
                             path_maps_gower = str(path)+'/maps_Gower_baryonified_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
                         else:
                             label_baryonification = 'normal'
                             path_maps_gower = str(path)+'/maps_Gower_{0}_{1}_{2}.npy'.format(rot,delta_rot,noise_rel)
-                        if not os.path.exists(path_maps_gower):
-                            if  os.path.exists(str(path)+'/delta_b_1024.npy'):
+                        
+				
+            			if not os.path.exists(path_maps_gower):
+                            if  os.path.exists(str(path)+'/delta_b_1024_{0}.npy'.format(noise_rel)):
                                 runs.append([str(path)+'/',rots,delta_rots, noise_rels])
-               
                
                                 missing_any = True
                                 break
@@ -525,7 +565,7 @@ if __name__ == '__main__':
             if not missing_any:
                 if delta_exist:
                     done+=1    
-    
+    	'''
         print ('RUNSTODO: ',len(runs),'RUNS DONE: ',done)
         
         comm = MPI.COMM_WORLD

@@ -618,7 +618,28 @@ def unrotate_map(rotated_map, nside_maps, rot, delta_=0.0):
 
 
 
+def build_shells(shells_info: dict,samples_per_shell: int = 100):
+    steps_rev = shells_info["Step"][::-1]
+    z_near_rev = shells_info["z_near"][::-1]
+    z_far_rev = shells_info["z_far"][::-1]
 
+    shells: List[glass.shells.RadialWindow] = []
+    zeff_list = []
+    steps_list = []
+
+    for step, zmin, zmax in zip(steps_rev, z_near_rev, z_far_rev):
+        za = np.linspace(float(zmin), float(zmax), samples_per_shell)
+        wa = np.ones_like(za)
+        zeff = 0.5 * (float(zmin) + float(zmax))
+        shells.append(glass.shells.RadialWindow(za, wa, zeff))
+        steps_list.append(int(step))
+        zeff_list.append(zeff)
+
+    steps = np.asarray(steps_list, dtype=int)
+    zeff_array = np.asarray(zeff_list, dtype=float)
+    return shells, steps, zeff_array
+
+     
 
 def build_shell_windows_and_partitions(
     shells_info: dict,
@@ -818,7 +839,9 @@ def load_and_baryonify_gower_st_shells(
     nside_maps,
     shells_info,
     shells,
-    overwrite_baryonified_shells = False
+    overwrite_baryonified_shells = False,
+    dens_path = None,
+    tsz_path = None
 ):
     """
     Load or create baryonified (or normal) GowerSt2 density shells.
@@ -839,8 +862,11 @@ def load_and_baryonify_gower_st_shells(
         label_baryonification = "baryonified"
 
         halo_catalog_path = os.path.join(path_simulation, "halo_catalog.parquet")
-        tsz_path = os.path.join(path_simulation, f"tsz_{nside_maps}.npy")
-        dens_path = os.path.join(path_simulation, f"delta_b_{nside_maps}.npy")
+        if tsz_path is None:
+            tsz_path = os.path.join(path_simulation, f"tsz_{nside_maps}.npy")
+        if dens_path is None:
+            dens_path = os.path.join(path_simulation, f"delta_b_{nside_maps}.npy")
+
 
         # --- Create halo catalog if missing
         if not os.path.exists(halo_catalog_path):
@@ -889,7 +915,8 @@ def load_and_baryonify_gower_st_shells(
 
     else:
         label_baryonification = "normal"
-        dens_path = os.path.join(path_simulation, f"delta_{nside_maps}.npy")
+        if dens_path is None:
+            dens_path = os.path.join(path_simulation, f"delta_{nside_maps}.npy")
 
         if not os.path.exists(dens_path):
             density = make_density_maps(
