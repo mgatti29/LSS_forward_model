@@ -203,48 +203,116 @@ def read_sims_params(path):
         Minimal params dict handy for Colossus (if you use it elsewhere).
     """
     # ---- read CLASS background
-    h5_path = glob.glob(f"{path}/class_processed*")[0]
-    with h5.File(h5_path, "r") as f:
-        bg = f['background']
-        Omega_b   = (bg['rho_b'][()]   / bg['rho_crit'][()])[-1]
-        Omega_cdm = (bg['rho_cdm'][()] / bg['rho_crit'][()])[-1]
-        try:
-            Omega_nu = ((bg['rho_ncdm[0]'][()] + bg['rho_ncdm[1]'][()] + bg['rho_ncdm[2]'][()]) /
-                        bg['rho_crit'][()])[-1]
-        except KeyError:
-            Omega_nu = (bg['rho_ncdm[0]'][()] / bg['rho_crit'][()])[-1]
-        Omega_r   = (bg['rho_g'][()]   / bg['rho_crit'][()])[-1]
-        Omega_m   = Omega_b + Omega_cdm + Omega_nu
+    
 
-        # CLASS stores H(a) in 1/Mpc; convert to h = H0/(100 km/s/Mpc)
-        # 1/Mpc → km/s/Mpc via c = 299792.458 km/s; factor 977.792 is commonly used.
-        h_dimless = float(bg['H'][-1] * 977.792 / 100.0)
+    try:
+        h5_path = glob.glob(f"{path}/class_processed*")[0]
+        with h5.File(h5_path, "r") as f:
+            bg = f['background']
+            Omega_b   = (bg['rho_b'][()]   / bg['rho_crit'][()])[-1]
+            Omega_cdm = (bg['rho_cdm'][()] / bg['rho_crit'][()])[-1]
+            try:
+                Omega_nu = ((bg['rho_ncdm[0]'][()] + bg['rho_ncdm[1]'][()] + bg['rho_ncdm[2]'][()]) /
+                            bg['rho_crit'][()])[-1]
+            except KeyError:
+                Omega_nu = (bg['rho_ncdm[0]'][()] / bg['rho_crit'][()])[-1]
+            Omega_r   = (bg['rho_g'][()]   / bg['rho_crit'][()])[-1]
+            Omega_m   = Omega_b + Omega_cdm + Omega_nu
+    
+            # CLASS stores H(a) in 1/Mpc; convert to h = H0/(100 km/s/Mpc)
+            # 1/Mpc → km/s/Mpc via c = 299792.458 km/s; factor 977.792 is commonly used.
+            h_dimless = float(bg['H'][-1] * 977.792 / 100.0)
+    
+            if 'w_fld' in bg:
+                w0 = float(bg['w_fld'][-1])
+                w  = float(bg['w_fld'][-100])
+                z  = float(np.array(bg['z'])[-100])
+                fz = z / (1.0 + z) if z > 0 else 1.0
+                wa = (w - w0) / fz if fz != 0 else 0.0
+            else:
+                w0, wa = -1.0, 0.0
 
-        if 'w_fld' in bg:
-            w0 = float(bg['w_fld'][-1])
-            w  = float(bg['w_fld'][-100])
-            z  = float(np.array(bg['z'])[-100])
-            fz = z / (1.0 + z) if z > 0 else 1.0
-            wa = (w - w0) / fz if fz != 0 else 0.0
-        else:
-            w0, wa = -1.0, 0.0
+        m_nu = float(Omega_nu * (93.14 * h_dimless**2))
+    
+        # ---- read control.par (A_s, n_s, box)
+        values = {}
+        with open(f"{path}/control.par", "r") as f:
+            for line in f:
+                if any(k in line for k in ('dNormalization', 'dSpectral', 'dBoxSize', 'dRedFrom','nSideHealpix')):
+                    key = line.split('=')[0].strip()
+                    val = line.split('=')[1].split('#')[0].strip()
+                    values[key] = float(val)
+    
+        As       = float(values['dNormalization'])
+        n_s      = float(values['dSpectral'])
+        dBoxSize = float(values['dBoxSize'])
+        max_z    = float(values['dRedFrom'])
+        nSideHealpix = int(values['nSideHealpix'])
 
-    m_nu = float(Omega_nu * (93.14 * h_dimless**2))
+    except:
+        # load this:
+        params = {}
+        path_ = f"{path}/nbodykit_cosmology.txt"
+            
+        with open(path_, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                
+                key, val = [x.strip() for x in line.split("=", 1)]
+                
+                # Try to interpret value
+                try:
+                    # handle lists like [0.06]
+                    if val.startswith("["):
+                        val = ast.literal_eval(val)
+                    else:
+                        val = float(val)
+                except:
+                    # keep as string if not numeric
+                    pass
+                
+                params[key] = val
+            
+            Omega_b   = params.get("Omega_b")
+            Omega_cdm = params.get("Omega_cdm")
+            Omega_m   = params.get("Omega0_m") or params.get("Omega_m")
+            
+            # neutrinos
+            m_ncdm = params.get("m_ncdm", [0.0])
+            if isinstance(m_ncdm, float):
+                m_ncdm = [m_ncdm]
+            
+            h_dimless = params.get("h")
+            
+            # compute Omega_nu from masses
+            Omega_nu = float(m_ncdm.strip("'[").strip("']")) / (93.14 * h**2)
+            m_nu = float(m_ncdm.strip("'[").strip("']")) 
+            # radiation (approx, since not explicitly given)
+            Omega_r = 2.47e-5 / h_dimless**2  # photons only (can refine)
+            
+            # w0, wa
+            w0 = params.get("w0_fld", -1.0)
+            wa = 0.0  # not present in your file
+        
+        
+            # ---- read control.par (A_s, n_s, box)
+            values = {}
+            with open(f"{path}/control.par", "r") as f:
+                for line in f:
+                    if any(k in line for k in ( 'dSpectral', 'dBoxSize', 'dRedFrom','nSideHealpix')):
+                        key = line.split('=')[0].strip()
+                        val = line.split('=')[1].split('#')[0].strip()
+                        values[key] = float(val)
+        
+            As       = params.get("A_s", -1.0)
+            n_s      = float(values['dSpectral'])
+            dBoxSize = float(values['dBoxSize'])
+            max_z    = float(values['dRedFrom'])
+            nSideHealpix = int(values['nSideHealpix'])
 
-    # ---- read control.par (A_s, n_s, box)
-    values = {}
-    with open(f"{path}/control.par", "r") as f:
-        for line in f:
-            if any(k in line for k in ('dNormalization', 'dSpectral', 'dBoxSize', 'dRedFrom','nSideHealpix')):
-                key = line.split('=')[0].strip()
-                val = line.split('=')[1].split('#')[0].strip()
-                values[key] = float(val)
 
-    As       = float(values['dNormalization'])
-    n_s      = float(values['dSpectral'])
-    dBoxSize = float(values['dBoxSize'])
-    max_z    = float(values['dRedFrom'])
-    nSideHealpix = int(values['nSideHealpix'])
 
 
     # ---- compute sigma8 from CAMB
