@@ -198,7 +198,7 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
 
     cosmo = ccl.Cosmology(Omega_c = sims_parameters['Omega_cdm'], Omega_b = sims_parameters['Omega_b'], 
                           h =  sims_parameters['h'], sigma8 = sims_parameters['sigma_8'], 
-                          n_s = sims_parameters['n_s'], #w0 = cosmological_parameters['w0'], wa = cosmological_parameters['wa'], 
+                          n_s = sims_parameters['n_s'], w0 = cosmological_parameters['w0'], wa = cosmological_parameters['wa'], 
                           m_nu = [sims_parameters['m_nu']/3,sims_parameters['m_nu']/3,sims_parameters['m_nu']/3],mass_split='equal',
                           matter_power_spectrum='linear')
     z_hr = np.linspace(0, 10, 5001)
