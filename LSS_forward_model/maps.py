@@ -188,6 +188,7 @@ def baryonify_shell(halos, sims_parameters, counts, bpar, min_z, max_z, nside):
         'h': sims_parameters['h'],
         'n_s': sims_parameters['n_s'],
         'w0': sims_parameters['w0'],
+        'wa': sims_parameters['wa'],
         'Omega_b': sims_parameters['Omega_b'],
     }
 
@@ -972,6 +973,7 @@ def make_tsz_and_baryonified_density(
                 "h": sims_parameters["h"],
                 "n_s": sims_parameters["n_s"],
                 "w0": sims_parameters["w0"],
+                "wa": sims_parameters["wa"],
                 "Omega_b": sims_parameters["Omega_b"],
             }
     
@@ -1076,6 +1078,7 @@ def make_tsz_and_baryonified_density(
                         "h": sims_parameters["h"],
                         "n_s": sims_parameters["n_s"],
                         "w0": sims_parameters["w0"],
+                        "wa": sims_parameters["wa"],
                         "Omega_b": sims_parameters["Omega_b"],
                     }
                     halos_ = bfn.utils.HaloLightConeCatalog(
