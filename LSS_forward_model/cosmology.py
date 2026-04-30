@@ -355,7 +355,8 @@ def read_sims_params(path):
 
 
     # ---- CCL cosmology
-    cosmo_pyccl = ccl.Cosmology(
+    cosmo_pyccl = ccl.Cosmology(w0=sims_parameters['w0'],
+        wa=sims_parameters['wa'],
         Omega_c=sims_parameters['Omega_cdm'],
         Omega_b=sims_parameters['Omega_b'],
         h=sims_parameters['h'],
