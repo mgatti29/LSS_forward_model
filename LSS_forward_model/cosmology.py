@@ -287,14 +287,14 @@ def read_sims_params(path):
             h_dimless = params.get("h")
             
             # compute Omega_nu from masses
-            Omega_nu = float(m_ncdm.strip("'[").strip("']")) / (93.14 * h**2)
+            Omega_nu = float(m_ncdm.strip("'[").strip("']")) / (93.14 * h_dimless**2)
             m_nu = float(m_ncdm.strip("'[").strip("']")) 
             # radiation (approx, since not explicitly given)
             Omega_r = 2.47e-5 / h_dimless**2  # photons only (can refine)
             
             # w0, wa
             w0 = params.get("w0_fld", -1.0)
-            wa = 0.0  # not present in your file
+            wa = params.get("wa", 0.)   # not present in your file
         
         
             # ---- read control.par (A_s, n_s, box)
