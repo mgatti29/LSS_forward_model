@@ -294,7 +294,7 @@ def read_sims_params(path):
             
             # w0, wa
             w0 = params.get("w0_fld", -1.0)
-            wa = params.get("wa", 0.)   # not present in your file
+            wa = params.get("wa_fld", 0.)   # not present in your file
         
         
             # ---- read control.par (A_s, n_s, box)
