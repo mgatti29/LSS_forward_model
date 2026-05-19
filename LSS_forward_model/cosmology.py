@@ -364,7 +364,7 @@ def read_sims_params(path):
         n_s=sims_parameters['n_s'],
         m_nu=[sims_parameters['m_nu']/3.0]*3,  # equal split
         mass_split='equal',
-        matter_power_spectrum='linear',
+        matter_power_spectrum='linear',dark_energy_model = "ppf"
     )
     
     # ---- Colossus-friendly dict (no Colossus import here)
