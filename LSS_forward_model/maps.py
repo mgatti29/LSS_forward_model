@@ -189,7 +189,7 @@ def baryonify_shell(halos, sims_parameters, counts, bpar, min_z, max_z, nside):
         'n_s': sims_parameters['n_s'],
         'w0': sims_parameters['w0'],
         'wa': sims_parameters['wa'],
-        'Omega_b': sims_parameters['Omega_b'],"dark_energy_model" =  "ppf" 
+        'Omega_b': sims_parameters['Omega_b'],"dark_energy_model" :  "ppf" 
     }
 
     shell = bfn.utils.LightconeShell(map=counts, cosmo=cdict)
@@ -974,7 +974,7 @@ def make_tsz_and_baryonified_density(
                 "n_s": sims_parameters["n_s"],
                 "w0": sims_parameters["w0"],
                 "wa": sims_parameters["wa"],
-                "Omega_b": sims_parameters["Omega_b"],"dark_energy_model" =  "ppf" 
+                "Omega_b": sims_parameters["Omega_b"],"dark_energy_model" :  "ppf" 
             }
     
             halos_ = bfn.utils.HaloLightConeCatalog(
@@ -1079,7 +1079,7 @@ def make_tsz_and_baryonified_density(
                         "n_s": sims_parameters["n_s"],
                         "w0": sims_parameters["w0"],
                         "wa": sims_parameters["wa"],
-                        "Omega_b": sims_parameters["Omega_b"],"dark_energy_model" =  "ppf" 
+                        "Omega_b": sims_parameters["Omega_b"],"dark_energy_model" :  "ppf" 
                     }
                     halos_ = bfn.utils.HaloLightConeCatalog(
                         halos["ra"][mask_z], halos["dec"][mask_z], halos["M"][mask_z], halos["z"][mask_z], cosmo=cdict
