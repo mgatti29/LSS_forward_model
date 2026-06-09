@@ -355,16 +355,23 @@ def read_sims_params(path):
 
 
     # ---- CCL cosmology
-    cosmo_pyccl = ccl.Cosmology(w0=sims_parameters['w0'],
-        wa=sims_parameters['wa'],
-        Omega_c=sims_parameters['Omega_cdm'],
-        Omega_b=sims_parameters['Omega_b'],
-        h=sims_parameters['h'],
-        sigma8=sims_parameters['sigma_8'],
-        n_s=sims_parameters['n_s'],
-        m_nu=[sims_parameters['m_nu']/3.0]*3,  # equal split
-        mass_split='equal',
-        matter_power_spectrum='linear',extra_parameters={"camb": { "dark_energy_model": "ppf"}}
+    cosmo_pyccl = ccl.Cosmology(
+    w0=sims_parameters['w0'],
+    wa=sims_parameters['wa'],
+    Omega_c=sims_parameters['Omega_cdm'],
+    Omega_b=sims_parameters['Omega_b'],
+    h=sims_parameters['h'],
+    sigma8=sims_parameters['sigma_8'],
+    n_s=sims_parameters['n_s'],
+    m_nu=[sims_parameters['m_nu']/3.0]*3,
+    mass_split='equal',
+    matter_power_spectrum='camb',
+    extra_parameters={
+        "camb": {
+            "dark_energy_model": "ppf",
+            "halofit_version": "mead2020",
+        }
+    }
     )
     
     # ---- Colossus-friendly dict (no Colossus import here)
@@ -423,9 +430,15 @@ def make_cosmo_bundle(sims_parameters):
     n_s=sims_parameters['n_s'],
     m_nu=[sims_parameters['m_nu'] / 3.0] * 3,
     mass_split='equal',
-    matter_power_spectrum='linear',
-    extra_parameters={"camb": { "dark_energy_model": "ppf"}}
+    matter_power_spectrum='camb',
+    extra_parameters={
+        "camb": {
+            "dark_energy_model": "ppf",
+            "halofit_version": "mead2020",
+        }
+    },
     )
+
     cosmo_pyccl = ccl.Cosmology(**cosmo_kwargs)
     
     # ---- Colossus-friendly dict (no Colossus import here)
