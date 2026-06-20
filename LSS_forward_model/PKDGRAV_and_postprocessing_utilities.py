@@ -192,7 +192,7 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
     f_mass = (Lbox**3 * cosmo.critical_density(0).to(u.Msun/u.Mpc**3)).value  # Msun
 
     # ---- PKDGRAV halo dtype (as you had it)
-    pkd_halo_dtype = np.dtype([
+    pkd_halo_dtype_old = np.dtype([
         ("rPot", ("f4", 3)), ("minPot", "f4"), ("rcen", ("f4", 3)),
         ("rcom", ("f4", 3)), ("cvom", ("f4", 3)), ("angular", ("f4", 3)),
         ("inertia", ("f4", 6)), ("sigma", "f4"), ("rMax", "f4"),
@@ -200,6 +200,11 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
         ("fEnvironDensity1", "f4"), ("rHalf", "f4")
     ])
 
+    pkd_halo_dtype_so = np.dtype(pkd_halo_dtype_old.descr + [
+      ("r200c", "f4"),
+      ("m200c", "f4"),
+    ])
+    
     def fof_path(shell):    return f"{base_dir}/run.00{int(shell):03d}.fofstats.0"
     def pq_path(shell):     return f"{base_dir}/run.00{int(shell):03d}.fofstats.parquet"
 
@@ -214,7 +219,24 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
             if not os.path.exists(dst):
                 # convert only when z condition holds and source exists
                 if z_far < z_max_for_convert and os.path.exists(src):
-                    halos = np.fromfile(src, dtype=pkd_halo_dtype)
+                    #halos = np.fromfile(src, dtype=pkd_halo_dtype)
+
+                    file_size = os.path.getsize(src)
+                    
+                    if file_size % pkd_halo_dtype_so.itemsize == 0:
+                      halos = np.fromfile(src, dtype=pkd_halo_dtype_so)
+                      has_so = True
+                    elif file_size % pkd_halo_dtype_old.itemsize == 0:
+                      halos = np.fromfile(src, dtype=pkd_halo_dtype_old)
+                      has_so = False
+                    else:
+                      raise ValueError(
+                          f"Cannot infer FOF dtype for {src}: size={file_size}, "
+                          f"old record={pkd_halo_dtype_old.itemsize}, new record={pkd_halo_dtype_so.itemsize}"
+                      )
+
+
+
                     if halos.size == 0:
                         print(f"[shell {shell:03d}] empty FOF file; skipping")
                         continue
@@ -224,6 +246,15 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
                     rmax        = (Lbox_Mpc * halos["rMax"] * 1000).astype("uint16")  # kpc in uint16
                     log10M      = (np.log10(halos["fMAss"] * f_mass) * 1000).astype("uint16")
 
+                    if has_so:
+                        r200c = (Lbox_Mpc * halos["r200c"] * 1000).astype("uint16")  # kpc
+                        log10M200c = (np.log10(halos["m200c"] * f_mass) * 1000).astype("uint16")
+                    else:
+                        r200c = np.zeros(halos.size, dtype="uint16")
+                        log10M200c = np.zeros(halos.size, dtype="uint16")
+
+                        
+                      
                     # inertia autos: take (0,3,5) diagonals, log10 scaled
                     pm = np.empty((halos.size, 3), dtype=np.float32)
                     pm[:, 0] = halos["inertia"][:, 0]
@@ -241,14 +272,18 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
                     # angular: signed log scale
                     angular = (np.sign(halos["angular"]) * np.log10(np.abs(halos["angular"]) * 1e20 + 1) * 1000).astype("int16")
 
+
                     df = pd.DataFrame({
-                        "halo_center":   halo_center.tolist(),       # list-of-3 float
-                        "rmax":          rmax,                        # uint16
-                        "log10M":   log10M,                      # uint16
-                        "inertia_auto":  inertia_auto.tolist(),       # list-of-3 uint16
-                        "inertia_cross": inertia_cross.tolist(),      # list-of-3 uint16
-                        "angular":       angular.tolist(),            # list-of-3 int16
+                      "halo_center":   halo_center.tolist(),
+                      "rmax":          rmax,
+                      "log10M":        log10M,
+                      "r200c":         r200c,
+                      "log10M200c":    log10M200c,
+                      "inertia_auto":  inertia_auto.tolist(),
+                      "inertia_cross": inertia_cross.tolist(),
+                      "angular":       angular.tolist(),
                     })
+
                     df.to_parquet(dst, engine="pyarrow", compression="brotli")
 
                     # verify parquet loads
