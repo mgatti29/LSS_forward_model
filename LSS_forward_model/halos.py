@@ -93,9 +93,18 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                                    ("fEnvironDensity1", "f4"), ("rHalf", "f4")])
     
         parquet_ = True
-        columns_to_read = ['halo_center', 'rmax', 'log10M']
+       
+
+        has_native_m200c = False
         try:
-            halos = pd.read_parquet(p, columns=columns_to_read)
+            try:
+                columns_to_read = ['halo_center', 'rmax', 'log10M','log10M200c','r200c']
+                halos = pd.read_parquet(p, columns=columns_to_read)
+                has_native_m200c = "log10M200c" in halos.columns
+            except:
+                columns_to_read = ['halo_center', 'rmax', 'log10M']
+                halos = pd.read_parquet(p, columns=columns_to_read)
+                has_native_m200c = "log10M200c" in halos.columns           
         except:
             try:
     
@@ -126,18 +135,37 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
         centers = np.array([x for x in np.array(halos['halo_center'])])
         M = np.array([x for x in np.array(halos['log10M'])])
         rmax = np.array([x for x in np.array(halos['rmax'])])
+
+        # there might be SO masses and radius
+        if has_native_m200c:
+            M200c = np.array([x for x in np.array(halos['log10M200c'])])
+            r200c = np.array([x for x in np.array(halos['r200c'])])
+        
+            output = {
+                'x': centers[:, 0],
+                'y': centers[:, 1],
+                'z': centers[:, 2],
+                'rhalf': rmax,
+                'r200c': r200c,
+                'M200c': M200c,
+                'M': M 
+            }
+        
+                    
+            return output             
     
+        else:
     
-        output = {
-            'x': centers[:, 0],
-            'y': centers[:, 1],
-            'z': centers[:, 2],
-            'rhalf': rmax,
-            'M': M 
-        }
-    
-                
-        return output    
+            output = {
+                'x': centers[:, 0],
+                'y': centers[:, 1],
+                'z': centers[:, 2],
+                'rhalf': rmax,
+                'M': M 
+            }
+        
+                    
+            return output    
 
     def may_intersect_sphere(x_i, y_i, z_i, Lbox_Mpc, d_min, d_max):
         """
@@ -200,7 +228,11 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                           h =  sims_parameters['h'], sigma8 = sims_parameters['sigma_8'], 
                           n_s = sims_parameters['n_s'], w0 = cosmological_parameters['w0'], wa = cosmological_parameters['wa'], 
                           m_nu = [sims_parameters['m_nu']/3,sims_parameters['m_nu']/3,sims_parameters['m_nu']/3],mass_split='equal',
-                          matter_power_spectrum='linear',extra_parameters={"camb": { "dark_energy_model": "ppf"}})
+                          matter_power_spectrum='linear',extra_parameters={"camb": {"dark_energy_model": "ppf","halofit_version": "mead2020",}})
+
+
+
+    
     z_hr = np.linspace(0, 10, 5001)
     d_hr = ccl.comoving_radial_distance(cosmo, 1./(1+z_hr))
 
@@ -222,8 +254,10 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
         'y': [],
         'z': [],
         'M': [],
+        'M200c': [],
         'redshift': [],
         'R': [],
+        'R200c': [],
         'ra': [],
         'dec': [],
         'redshift_hr': [],
@@ -260,6 +294,8 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
         final_cat_M = []
         final_cat_R = []
         final_cat_redshift = []
+        final_cat_M200c = []
+        final_cat_R200c = []
         # Iterate through replicas
         for x_i in range(-replicas_max, replicas_max ):
             for y_i in range(-replicas_max , replicas_max ):
@@ -278,6 +314,11 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                                 final_cat_z.append(new_z[mask])
                                 final_cat_M.append(output_['M'][mask])
                                 final_cat_R.append(output_['rhalf'][mask])
+                                try:
+                                    final_cat_M200c.append(output_['M200c'][mask])
+                                    final_cat_R200c.append(output_['r200c'][mask])
+                                except:
+                                    pass
                                 final_cat_redshift.append(interpolated_distance_to_redshift(r[mask]))
                             add += 1
          
@@ -285,12 +326,16 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                             
 
         # Append collected data from this step to the final catalog
-        if add>0:
+        if len(final_cat_x)>0:
             final_cat['pix_16384_ring'].append(hp.pixelfunc.vec2pix(8192 * 2, np.concatenate(final_cat_x), np.concatenate(final_cat_y), np.concatenate(final_cat_z), nest=False))
             final_cat['M'].append(np.concatenate(final_cat_M) )
             final_cat['R'].append(np.concatenate(final_cat_R) )
             final_cat['redshift'].append(np.concatenate(final_cat_redshift) * 10000)
-
+            try:
+                final_cat['M200c'].append(np.concatenate(final_cat_M200c) )
+                final_cat['R200c'].append(np.concatenate(final_cat_R200c) )
+            except:
+                pass
     for key in final_cat:
         if isinstance(final_cat[key], list):
             final_cat[key] = np.concatenate(final_cat[key]) if final_cat[key] else np.array([])
@@ -306,6 +351,10 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
     fits_f['log_M'] = (final_cat['M']).astype('uint16')  # this is Msun/h ---
     fits_f['R'] = (final_cat['R']).astype('uint16')
     fits_f['redshift'] = (final_cat['redshift']).astype('uint16')
+    if len(final_cat['M200c'])>0:
+        fits_f['log_M200c_SO'] = (final_cat['M200c']).astype('uint16')  # this is Msun/h ---
+        fits_f['R200c_S0'] = (final_cat['R200c']).astype('uint16')
+ 
     
     df = pd.DataFrame(fits_f)
 
@@ -378,37 +427,28 @@ def reconstruct_angular_halo_snapshot(df):
     return angular
 
 
-def recover_halo_mass(df):
+def recover_halo_mass(df, preferred_mass_col=None):
     """
-    Recover mass in M_sun/h from df['log10M'].
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame with a 'log10M' column (uint16, scaled).
-
-    Returns
-    -------
-    mass : np.ndarray
-        Mass in M_sun/h.
+    Recover mass in M_sun/h from a scaled log10 mass column.
     """
-
-    if 'log10M' in df.columns:
-        mass_col = 'log10M'
-    elif 'log_M' in df.columns:
-        mass_col = 'log_M'
+    if preferred_mass_col is not None and preferred_mass_col in df.columns:
+        mass_col = preferred_mass_col
+    elif "log_M200c_SO" in df.columns:
+        mass_col = "log_M200c_SO"
+    elif "log10M200c" in df.columns:
+        mass_col = "log10M200c"
+    elif "log10M" in df.columns:
+        mass_col = "log10M"
+    elif "log_M" in df.columns:
+        mass_col = "log_M"
     else:
-        raise KeyError("No mass column found (expected 'log10M' or 'log_M').")
+        raise KeyError("No mass column found: expected log_M200c_SO, log10M200c, log10M, or log_M.")
 
     vals = df[mass_col].to_numpy()
 
-    # detect whether there's a missing factor of 1000
     if np.min(vals) / 1000 < 10:
-        # old sims: values were 1000x too large
         return 10**(vals / 1000. + 4)
-    else:
-        # new sims: already correct
-        return 10**(vals / 1000.)
+    return 10**(vals / 1000.)
 
 def recover_halo_redshift(df):
     """
@@ -517,6 +557,12 @@ def load_halo_catalog(
 
     # Load catalog
     df = pd.read_parquet(path_halo_cat, engine="pyarrow")
+    has_native_m200c = "log10M200c" in df.columns
+    if has_native_m200c:
+        M200c_SO = recover_halo_mass(df, preferred_mass_col="log10M200c")
+ 
+
+
 
     # Recover base fields
     M_fof = recover_halo_mass(df)          # Msun/h
@@ -537,12 +583,21 @@ def load_halo_catalog(
     # Apply mass cut -----------------------------------
     mask = (np.log10(M200c) > halo_catalog_log10mass_cut)
 
-    halos = {
-        "M":   M200c[mask],
-        "z":   z[mask],
-        "ra":  ra[mask],
-        "dec": dec[mask],
-    }
+    if has_native_m200c:
+        halos = {
+            "M_SO":   M200c[M200c_SO],
+            "M":   M200c[mask],
+            "z":   z[mask],
+            "ra":  ra[mask],
+            "dec": dec[mask],
+        }
+    else:
+        halos = {
+            "M":   M200c[mask],
+            "z":   z[mask],
+            "ra":  ra[mask],
+            "dec": dec[mask],
+        }
     return halos
 
 
