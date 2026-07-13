@@ -426,30 +426,33 @@ def reconstruct_angular_halo_snapshot(df):
     angular = sign * magnitude
     return angular
 
-
 def recover_halo_mass(df, preferred_mass_col=None):
-    """
-    Recover mass in M_sun/h from a scaled log10 mass column.
-    """
-    if preferred_mass_col is not None and preferred_mass_col in df.columns:
-        mass_col = preferred_mass_col
-    elif "log_M200c_SO" in df.columns:
-        mass_col = "log_M200c_SO"
-    elif "log10M200c" in df.columns:
-        mass_col = "log10M200c"
-    elif "log10M" in df.columns:
-        mass_col = "log10M"
-    elif "log_M" in df.columns:
-        mass_col = "log_M"
-    else:
-        raise KeyError("No mass column found: expected log_M200c_SO, log10M200c, log10M, or log_M.")
+      if preferred_mass_col is not None and preferred_mass_col in df.columns:
+          mass_col = preferred_mass_col
+      elif "log10M" in df.columns:
+          mass_col = "log10M"
+      elif "log_M" in df.columns:
+          mass_col = "log_M"
+      elif "log_M200c_SO" in df.columns:
+          mass_col = "log_M200c_SO"
+      elif "log10M200c" in df.columns:
+          mass_col = "log10M200c"
+      else:
+          raise KeyError("No mass column found")
 
-    vals = df[mass_col].to_numpy()
+      vals = df[mass_col].to_numpy()
 
-    if np.min(vals) / 1000 < 10:
-        return 10**(vals / 1000. + 4)
-    return 10**(vals / 1000.)
+      # New catalogs are already log10(M) * 1000. Do not +4 them.
+      if mass_col in ("log_M", "log10M", "log_M200c_SO", "log10M200c"):
+          mass = 10.0 ** (vals / 1000.0)
+          mass[vals <= 0] = np.nan
+          return mass
 
+      good = vals > 0
+      if np.any(good) and np.nanmin(vals[good]) / 1000 < 10:
+          return 10.0 ** (vals / 1000.0 + 4.0)
+      return 10.0 ** (vals / 1000.0)
+      
 def recover_halo_redshift(df):
     """
     Recover redshift from scaled df['redshift'] values.
