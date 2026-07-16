@@ -66,7 +66,7 @@ These two layers allow the same underlying realization to generate physically co
 - Apply map-level baryonification and paint thermal SZ observables
 - Generate galaxy-density and CMB-lensing fields
 - Produce correlated, multi-probe realizations for simulation-based inference
-- Work with PKDGRAV/Gower Street, CosmoGrid, FS2, FLAMINGO, GLASS, BaryonForge, CAMB, and related cosmology tools
+
 
 ## From simulations to survey observables
 
