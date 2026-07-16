@@ -1,0 +1,35 @@
+name: lss-forward-model
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  # Python 3.11 matches the current Gower production environment. NumPy is
+  # intentionally held at 1.x for compatibility with BaryonForge.
+  - python=3.11
+  - numpy=1.26
+  - scipy>=1.12,<2
+  - pandas>=2,<3
+  - astropy>=6,<7
+  - h5py>=3.10,<4
+  - healpy>=1.17,<2
+  - camb=1.5.9
+  - pyccl>=3.1.2,<4
+  - pyarrow>=15,<20
+  # BaryonForge imports joblib but does not currently declare it in its own metadata.
+  - joblib>=1.4,<2
+  - mpi4py>=4,<5
+  - matplotlib>=3.8,<4
+  - ipykernel>=6,<7
+  - jupyterlab>=4,<5
+  - pip>=24
+  - pip:
+      - cosmology==2022.10.9
+      - frogress>=0.10,<1
+      - colossus>=1.3.6,<2
+      # Pin the NumPy-1-compatible GLASS revision recorded by the older working
+      # environment. The moving gowerst branch now requires NumPy >=2.1.1,
+      # which conflicts with BaryonForge's NumPy 1.x requirement.
+      - git+https://github.com/glass-dev/glass.git@ba9b1b5
+      - git+https://github.com/DhayaaAnbajagane/BaryonForge.git@25e2e002201b9f47aaec1c309538bb5291b6deec
+      # When this proposal is moved to the repository root:
+      - -e .

@@ -1,6 +1,9 @@
 from __future__ import annotations
 import numpy as np
 import glass
+import glass.fields
+import glass.lensing
+import glass.shells
 from typing import List, Tuple
 import pandas as pd
 import healpy as hp
@@ -85,10 +88,10 @@ def add_shells(camb_pars,nside_maps = 1024,missing_shells = None):
     
     cc =  [cls_[f'W{i}xW{j}'] for i in range(1, n+1) for j in range(i, 0, -1)]
     
-    cls = glass.discretized_cls(cc, nside=nside_maps, lmax=lmax, ncorr=3)
-    fields = glass.gaussian_fields(missing_shells)
+    cls = glass.fields.discretized_cls(cc, nside=nside_maps, lmax=lmax, ncorr=3)
+    fields = glass.fields.gaussian_fields(missing_shells)
     
-    matter = glass.generate(fields, cls, nside_maps, ncorr=3)
+    matter = glass.fields.generate(fields, cls, nside_maps, ncorr=3)
     maps = list(matter)        # length 15, one HEALPix map per shell
     return maps
 

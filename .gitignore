@@ -1,0 +1,22 @@
+# Python bytecode and build products
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments and local install caches
+.conda-env/
+.install-cache/
+.venv/
+venv/
+
+# Notebook and test caches
+.ipynb_checkpoints/
+.pytest_cache/
+.coverage
+
+# Editor and operating-system files
+.DS_Store
+*.swp
+*.swo
