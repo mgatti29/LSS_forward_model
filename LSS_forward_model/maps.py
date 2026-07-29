@@ -800,13 +800,13 @@ def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
 
             if do_kappa:
                 if ss == 0:
-                    results["kappa"] = np.zeros((len(density),) + kappa.shape, dtype=kappa.dtype)
+                    results["kappa"] = np.zeros((len(density),) + kappa.shape, dtype=np.float32)#kappa.dtype)
                 results["kappa"][ss] = kappa
             
             if do_shear:
                 gamma = glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True)
                 if ss == 0:
-                    results["gamma"] = np.zeros((len(density),len(gamma),) + gamma[0].shape, dtype=gamma[0].dtype)
+                    results["gamma"] = np.zeros((len(density),len(gamma),) + gamma[0].shape, dtype=np.complex64)#gamma[0].dtype)
                 results["gamma"][ss] = gamma
 
     if do_IA:
@@ -820,7 +820,7 @@ def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
                 )
 
             if ss == 0:
-                results["IA_shear"] = np.zeros((len(density),len(IA),) + IA[0].shape, dtype=IA[0].dtype)
+                results["IA_shear"] = np.zeros((len(density),len(IA),) + IA[0].shape, dtype=np.complex64)#IA[0].dtype)
             results["IA_shear"][ss] = IA
         
     return results
