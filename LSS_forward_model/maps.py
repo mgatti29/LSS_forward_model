@@ -798,17 +798,17 @@ def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
             conv.add_window(density[ss], shells[ss])
             kappa = copy.deepcopy(conv.kappa)
 
-            if do_kappa:
-                if ss == 0:
-                    results["kappa"] = np.zeros((len(density),) + kappa.shape, dtype=np.float32)#kappa.dtype)
-                results["kappa"][ss] = kappa
-            
             if do_shear:
                 gamma = glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True)
                 if ss == 0:
                     results["gamma"] = np.zeros((len(density),len(gamma),) + gamma[0].shape, dtype=np.complex64)#gamma[0].dtype)
                 results["gamma"][ss] = gamma
-
+                
+            if do_kappa:
+                if ss == 0:
+                    results["kappa"] = np.zeros((len(density),) + kappa.shape, dtype=np.float32)#kappa.dtype)
+                results["kappa"][ss] = kappa
+            
     if do_IA:
         
         for ss in frogress.bar(range(len(density))):
