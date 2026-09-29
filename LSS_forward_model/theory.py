@@ -131,7 +131,7 @@ class LimberTheory:
                     _ = ee2.get_boost(self._emu_params, 0.5, np.asarray([0.1]))
                     print ('using euclid emu')
                 if self.nonlinear_req == "baccoemu":
-                    self.emulator = baccoemu.Matter_powerspectrum(nonlinear_model_name='Arico2023')
+                    self.emulator = baccoemu.Matter_powerspectrum(nonlinear_model_name='Arico2023', baryonic_model_name='Burger2025')
                     self._baccoemu_params['expfactor'] = 1/(1+0.5)
                     _, _ = self.emulator.get_nonlinear_boost(k=np.array([1.0, 1.1]), **self._baccoemu_params)
                     print ('using baccoemu')
