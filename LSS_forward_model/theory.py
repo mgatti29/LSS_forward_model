@@ -18,6 +18,13 @@ try:
     _EMU_OK = True
 except Exception:
     _EMU_OK = False
+    
+# optional baccoemu
+try:
+    import baccoemu
+    _BACCOEMU_OK = True
+except Exception:
+    _BACCOEMU_OK = False
 
 
 class LimberTheory:
@@ -39,7 +46,7 @@ class LimberTheory:
 
     def __init__(self, pars: camb.CAMBparams, lmax=4000,
                  nonlinear='euclidemu', zgrid_max_lss=12.0, nz_lss=2401,
-                 zgrid_max_kk=1100.0, nz_kk=140, feedback=0,kmax = 500):
+                 zgrid_max_kk=1100.0, nz_kk=140, feedback=0,kmax = 500, baryonic_params = None):
 
 
 
@@ -75,6 +82,18 @@ class LimberTheory:
         # emulator params
         self._emu_params = dict(As=self.As, ns=self.ns, Omb=self.Omb, Omm=self.Omm,
                                 h=self.h, mnu=self.mnu, w=self.w0, wa=self.wa)
+        
+        # baccoemu params
+        self._baccoemu_params = dict(omega_cold = self.Omc+self.Omb, A_s = self.As, omega_baryon = self.Omb, ns=self.ns, hubble=self.h,
+                                     neutrino_mass=self.mnu, w0=self.w0, wa=self.wa, expfactor = 1.)
+        
+        self._baryonic_params = baryonic_params
+        if self._baryonic_params is not None:
+            self._baryonic_params['eta'] = np.log10(0.5)
+            self._baryonic_params['M1_z0_cen'] = np.log10(1.526e11)
+            self._baryonic_params['theta_inn'] = np.log10(0.1)
+            self._baryonic_params['M_inn'] = np.log10(2.3e13)
+            self._baryonic_params['theta_out'] = np.log10(1.1)
 
         # --- P(k,z) interpolators ---
         # linear (wide z for kk)
@@ -104,12 +123,18 @@ class LimberTheory:
                 var1=model.Transfer_tot, var2=model.Transfer_tot
             )
 
-        # Decide if we’ll use emulator
-        self._use_emu = (self.nonlinear_req == "euclidemu") and _EMU_OK
+        # Decide if we’ll use emulator, and which
+        self._use_emu = (self.nonlinear_req == "euclidemu" and _EMU_OK) or (self.nonlinear_req == "baccoemu" and _BACCOEMU_OK)
         if self._use_emu:
             try:
-                _ = ee2.get_boost(self._emu_params, 0.5, np.asarray([0.1]))
-                print ('using euclid emu')
+                if self.nonlinear_req == "euclidemu":
+                    _ = ee2.get_boost(self._emu_params, 0.5, np.asarray([0.1]))
+                    print ('using euclid emu')
+                if self.nonlinear_req == "baccoemu":
+                    self.emulator = baccoemu.Matter_powerspectrum(nonlinear_model_name='Arico2023')
+                    self._baccoemu_params['expfactor'] = 1/(1+0.5)
+                    _, _ = self.emulator.get_nonlinear_boost(k=np.array([1.0, 1.1]), **self._baccoemu_params)
+                    print ('using baccoemu')
             except Exception:
                 self._use_emu = False  # cosmology out of domain
         self._emu_interp = None         # RegularGridInterpolator for boost(z,k)
@@ -231,11 +256,17 @@ class LimberTheory:
     EMU_K_MAX = 9.41     # h/Mpc
     def _emu_grid_boost(self, z_grid, k_grid):
         """
-        One batched EuclidEmulator2 call to fill a 2D table B[z,k].
+        One batched emulator call to fill a 2D table B[z,k].
         Handles dict/tuple/list/ndarray outputs; always returns (Nz, Nk).
         """
-        obj = ee2.get_boost(self._emu_params, np.asarray(z_grid), np.asarray(k_grid))
-    
+        if self.nonlinear_req == "euclidemu":
+            obj = ee2.get_boost(self._emu_params, np.asarray(z_grid), np.asarray(k_grid))
+        if self.nonlinear_req == "baccoemu":
+            self._baccoemu_params['expfactor'] = 1/(1+np.asarray(z_grid))
+            _, obj = self.emulator.get_nonlinear_boost(k=np.asarray(k_grid), cold = True, **self._baccoemu_params)
+            if self._baryonic_params is not None:
+                self._baccoemu_params = {**self._baccoemu_params, **self._baryonic_params}
+                obj *= self.emulator.get_baryonic_boost(k=np.asarray(k_grid), cold = True, **self._baccoemu_params)[1]
         # Peel "(k_eval, boosts)" tuples to the 'boosts' payload
         if isinstance(obj, tuple) and len(obj) == 2:
             obj = obj[1]
@@ -300,13 +331,18 @@ class LimberTheory:
         kmax_need = (lmax + 0.5) / np.min(self.chih)     # h/Mpc
     
         kmin = kmin_need
-        kmax = kmax_need
+        if self.nonlinear_req == "euclidemu":
+            kmax = kmax_need
+            zmax = min([10,np.max(self.zs)])
+        elif self.nonlinear_req == 'baccoemu':
+            kmax = 4.9
+            zmax = 1/0.4 - 1
+
         if not np.isfinite(kmin) or not np.isfinite(kmax) or kmin >= kmax:
             # Nothing useful in-domain; skip EMU
             self._use_emu = False
             return
     
-        zmax = min([10,np.max(self.zs)])
         z_grid = np.linspace(0.0, zmax, Nz)
         k_grid = np.geomspace(kmin, kmax, Nk)
     
@@ -412,7 +448,7 @@ class LimberTheory:
         pref = dchi_h / (chi_h**2)  # [Nchi]
   
         # Decide backend once
-        using_emu = nonlinear and self._use_emu and (self.nonlinear_req == "euclidemu")
+        using_emu = nonlinear and self._use_emu and (self.nonlinear_req == "euclidemu" or self.nonlinear_req == "baccoemu")
         if using_emu:
             self._ensure_emu_cache(lmax=lmax)  # builds once if needed
     
