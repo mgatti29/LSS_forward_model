@@ -88,6 +88,12 @@ class LimberTheory:
                                      neutrino_mass=self.mnu, w0=self.w0, wa=self.wa, expfactor = 1.)
         
         self._baryonic_params = baryonic_params
+        if self._baryonic_params is not None:
+            self._baryonic_params['eta'] = np.log10(0.5)
+            self._baryonic_params['M1_z0_cen'] = np.log10(1.526e11)
+            self._baryonic_params['theta_inn'] = np.log10(0.1)
+            self._baryonic_params['M_inn'] = np.log10(2.3e13)
+            self._baryonic_params['theta_out'] = np.log10(1.1)
 
         # --- P(k,z) interpolators ---
         # linear (wide z for kk)
