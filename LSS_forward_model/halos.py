@@ -2,6 +2,8 @@ import os
 import gc
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import healpy as hp
 import pyccl as ccl
 import copy
@@ -15,8 +17,32 @@ import BaryonForge as bfn
 import astropy.io.fits as fits
 from astropy.cosmology import wCDM, Flatw0waCDM
 import astropy.units as u
+from .halo_ia import (
+    HALO_ELLIPTICITY_SCALE,
+    build_IA_halo_sources,
+    build_IA_halo_sources_from_catalog,
+    concentration_200c,
+    draw_sources,
+    encode_halo_ellipticity,
+    expected_counts_in_redshift_bins,
+    inverse_profile,
+    iter_IA_halo_sources,
+    occupation,
+    populate_IA_halo_shell,
+    project_inertia_tensor,
+    projected_nfw_surface_density,
+    radius_200c,
+    reconstruct_inertia_tensor_halo_snapshot,
+    recover_halo_ellipticity,
+    sample_radius,
+    sky_basis,
+    transport_phase,
+    unpack_inertia_tensor,
+)
 
-def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snapshots_path = '' , catalog_path = 'halo_catalog.parquet',log10_mass_limit = None):
+def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapshots_path='',
+                     catalog_path='halo_catalog.parquet', log10_mass_limit=None,
+                     include_ia_shapes=True):
 
     """
     Generate a lightcone halo catalog by assembling halo snapshots across redshift shells, 
@@ -39,6 +65,10 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
     catalog_path : str, optional
         Path to save the resulting halo catalog in FITS format.
 
+    include_ia_shapes : bool, optional
+        Project and store compact halo ellipticities. Disable this for a
+        baryonification-only catalogue.
+
     Notes
     -----
     - Halos are replicated in a cubic grid until they cover the spherical shell between cmd_near and cmd_far.
@@ -48,15 +78,22 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
 
     Output
     ------
-    A binary FITS table saved at `catalog_path`, containing:
+    A parquet table saved at `catalog_path`, containing:
         - pix_16384_ring: HEALPix pixel index
-        - log_M: Halo mass (in Msun/h, scaled by 1000)
-        - R: Halo half-mass radius (in kpc/h, scaled by 1000)
+        - log_M: log10 halo mass in physical Msun, scaled by 1000
+        - R: encoded native halo radius
         - redshift: Scaled by 10000
+        - ra_deg, dec_deg: exact replicated lightcone direction
+        - shell_index: low-to-high-redshift index aligned with ``build_shells``
+        - simulation_step: native PKDGRAV snapshot step
+        - host_e1_x10000, host_e2_x10000 and shape_valid when requested
     """  
 
 
-    def load_snapshot(path_base, c_, Lbox_Mpc, sims_parameters,log10_mass_limit = None):
+    halo_snapshots_path = os.path.join(os.fspath(halo_snapshots_path), '')
+
+    def load_snapshot(path_base, c_, Lbox_Mpc, sims_parameters, log10_mass_limit=None,
+                      include_ia_shapes=True):
         """
         Loads halo data from a specified path based on the mode.
     
@@ -92,19 +129,20 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                                    ("fMAss", "f4"), ("fEnvironDensity0", "f4"),
                                    ("fEnvironDensity1", "f4"), ("rHalf", "f4")])
     
-        parquet_ = True
-       
-
         has_native_m200c = False
         try:
             try:
-                columns_to_read = ['halo_center', 'rmax', 'log10M','log10M200c','r200c']
-                halos = pd.read_parquet(p, columns=columns_to_read)
-                has_native_m200c = "log10M200c" in halos.columns
+                columns_to_read = ['halo_center', 'rmax', 'log10M', 'log10M200c', 'r200c']
+                if include_ia_shapes:
+                    columns_to_read += ['inertia_auto', 'inertia_cross']
+                halos = pq.read_table(p, columns=columns_to_read)
+                has_native_m200c = "log10M200c" in halos.column_names
             except:
                 columns_to_read = ['halo_center', 'rmax', 'log10M']
-                halos = pd.read_parquet(p, columns=columns_to_read)
-                has_native_m200c = "log10M200c" in halos.columns           
+                if include_ia_shapes:
+                    columns_to_read += ['inertia_auto', 'inertia_cross']
+                halos = pq.read_table(p, columns=columns_to_read)
+                has_native_m200c = "log10M200c" in halos.column_names
         except:
             try:
     
@@ -112,35 +150,78 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                 halo_center = Lbox_Mpc * (halos_["rPot"]  + halos_["rcen"] + 0.5)
                 rmax = Lbox_Mpc * halos_["rMax"]
                 log10M = np.log10((halos_['fMAss'] * f_mass))
+                # Native PKDGRAV order is (xx,xy,xz,yy,yz,zz).  The portable
+                # catalogue convention is (xx,yy,zz,xy,xz,yz).
+                if include_ia_shapes:
+                    inertia_tensor = halos_["inertia"][:, [0, 3, 5, 1, 2, 4]].astype(np.float64)
     
                 halos = dict()
                 halos["halo_center"] = halo_center.tolist()
                 halos["rmax"] =  (rmax* 1000).astype('uint16')
                 halos["log10M"] = (log10M* 1000).astype('uint16')
+                if include_ia_shapes:
+                    halos["inertia_tensor"] = inertia_tensor
     
                 del halos_
                 
             except:
                 print ('failed ',p)
                 sd_
-        if log10_mass_limit is not None:
-            if min(halos['log10M'])/1000<10:    
-                # fiducial covariance, likely off by a factor 1000
-                mask = (halos['log10M']/1000 + 4) > log10_mass_limit
-                halos = halos[mask]
-            else:
-                mask = (halos['log10M']/1000)  > log10_mass_limit
-                halos = halos[mask]
-                        
-        centers = np.array([x for x in np.array(halos['halo_center'])])
-        M = np.array([x for x in np.array(halos['log10M'])])
-        rmax = np.array([x for x in np.array(halos['rmax'])])
+        if isinstance(halos, pa.Table):
+            encoded_mass = halos['log10M'].combine_chunks().to_numpy()
+        else:
+            encoded_mass = np.asarray(halos['log10M'])
+        positive_mass = encoded_mass > 0
+        legacy_fof_log10_offset = (
+            4.0
+            if (
+                np.any(positive_mass)
+                and np.min(encoded_mass[positive_mass]) / 1000.0 < 10.0
+            )
+            else 0.0
+        )
 
+        if log10_mass_limit is not None:
+            decoded_log10_mass = (
+                encoded_mass.astype(np.float64) / 1000.0
+                + legacy_fof_log10_offset
+            )
+            mask = positive_mass & (decoded_log10_mass > log10_mass_limit)
+            if isinstance(halos, pa.Table):
+                halos = halos.filter(pa.array(mask))
+            else:
+                halos = {name: np.asarray(value)[mask] for name, value in halos.items()}
+
+        if isinstance(halos, pa.Table):
+            if include_ia_shapes:
+                inertia_tensor = reconstruct_inertia_tensor_halo_snapshot(halos)
+            center_values = halos['halo_center'].combine_chunks().values.to_numpy()
+            centers = center_values.reshape(-1, 3)
+        else:
+            if include_ia_shapes:
+                inertia_tensor = np.asarray(halos['inertia_tensor'])
+            centers = np.asarray(halos['halo_center'])
+        # Store one canonical convention in every assembled lightcone:
+        # log10(M/Msun) * 1000.  Flamingo_big snapshot catalogues use the
+        # legacy convention (log10(M/Msun) - 4) * 1000, whereas the newer
+        # catalogues and native binary fallback already use the canonical one.
+        if isinstance(halos, pa.Table):
+            M = halos['log10M'].combine_chunks().to_numpy().copy()
+            rmax = halos['rmax'].combine_chunks().to_numpy()
+        else:
+            M = np.asarray(halos['log10M']).copy()
+            rmax = np.asarray(halos['rmax'])
+        if legacy_fof_log10_offset:
+            M = np.where(
+                M > 0,
+                np.rint(M.astype(np.float64) + 1000.0 * legacy_fof_log10_offset),
+                0,
+            ).astype(np.uint16)
         # there might be SO masses and radius
         if has_native_m200c:
-            M200c = np.array([x for x in np.array(halos['log10M200c'])])
-            r200c = np.array([x for x in np.array(halos['r200c'])])
-        
+            M200c = halos['log10M200c'].combine_chunks().to_numpy()
+            r200c = halos['r200c'].combine_chunks().to_numpy()
+
             output = {
                 'x': centers[:, 0],
                 'y': centers[:, 1],
@@ -148,12 +229,12 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                 'rhalf': rmax,
                 'r200c': r200c,
                 'M200c': M200c,
-                'M': M 
+                'M': M,
             }
-        
-                    
-            return output             
-    
+            if include_ia_shapes:
+                output['inertia_tensor'] = inertia_tensor
+            return output
+
         else:
     
             output = {
@@ -161,11 +242,11 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
                 'y': centers[:, 1],
                 'z': centers[:, 2],
                 'rhalf': rmax,
-                'M': M 
+                'M': M,
             }
-        
-                    
-            return output    
+            if include_ia_shapes:
+                output['inertia_tensor'] = inertia_tensor
+            return output
 
     def may_intersect_sphere(x_i, y_i, z_i, Lbox_Mpc, d_min, d_max):
         """
@@ -198,27 +279,23 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
     
         Notes
         -----
-        This function assumes the box is axis-aligned and cubic. It uses the box's 
-        center and diagonal to conservatively estimate the range of distances covered 
-        by the box and checks for overlap with the target spherical shell.
+        This function assumes the box is axis-aligned and cubic and computes
+        its exact minimum and maximum distance from the observer.
         """
-    # Center of the box after translation
-        center_x = x_i * Lbox_Mpc + Lbox_Mpc / 2
-        center_y = y_i * Lbox_Mpc + Lbox_Mpc / 2
-        center_z = z_i * Lbox_Mpc + Lbox_Mpc / 2
-        center = np.array([center_x, center_y, center_z])
-    
-        # Distance from the origin to the center of the box
-        center_distance = np.linalg.norm(center)
-        
-        # Radius of the sphere that contains the entire box (half-diagonal of the box)
-        half_diagonal = np.sqrt(3) * (Lbox_Mpc / 2)
-    
-        # Calculate the minimum and maximum distances any point in the box could be from the origin
-        min_distance = max(0, center_distance - half_diagonal)
-        max_distance = center_distance + half_diagonal
-    
-        # Check if there's any overlap between the box and the sphere range
+        # Exact radial bounds of this axis-aligned replicated box.  The old
+        # circumscribed-sphere test admitted boxes that could not intersect a
+        # thin shell, forcing unnecessary full-snapshot scans.
+        lower = np.array([x_i, y_i, z_i], dtype=float) * Lbox_Mpc
+        upper = lower + Lbox_Mpc
+        closest = np.where(
+            (lower <= 0.0) & (upper >= 0.0),
+            0.0,
+            np.minimum(np.abs(lower), np.abs(upper)),
+        )
+        furthest = np.maximum(np.abs(lower), np.abs(upper))
+        min_distance = np.linalg.norm(closest)
+        max_distance = np.linalg.norm(furthest)
+
         return (min_distance <= d_max and max_distance >= d_min),min_distance,max_distance
 
 
@@ -226,20 +303,26 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
 
     cosmo = ccl.Cosmology(Omega_c = sims_parameters['Omega_cdm'], Omega_b = sims_parameters['Omega_b'], 
                           h =  sims_parameters['h'], sigma8 = sims_parameters['sigma_8'], 
-                          n_s = sims_parameters['n_s'], w0 = sims_parameters['w0'], wa = sims_parameters['wa'], 
+                          n_s = sims_parameters['n_s'], w0 = sims_parameters['w0'], wa = sims_parameters['wa'],
                           m_nu = [sims_parameters['m_nu']/3,sims_parameters['m_nu']/3,sims_parameters['m_nu']/3],mass_split='equal',
                           matter_power_spectrum='linear',extra_parameters={"camb": {"dark_energy_model": "ppf","halofit_version": "mead2020",}})
 
 
 
-    
+
     z_hr = np.linspace(0, 10, 5001)
     d_hr = ccl.comoving_radial_distance(cosmo, 1./(1+z_hr))
 
     interpolated_distance_to_redshift = CubicSpline(d_hr, z_hr)
-    interpolated_redshift_to_distance = CubicSpline(z_hr, d_hr)
-
-    max_step_halocatalog = len(shells_info['z_far'])-int(shells_info['Step'][[shells_info['z_far']<max_redshift][0]][0])+1
+    maximum_distance = float(
+        ccl.comoving_radial_distance(cosmo, 1.0 / (1.0 + max_redshift))
+    )
+    shell_indices = np.flatnonzero(
+        (np.asarray(shells_info['z_near']) < max_redshift)
+        & (np.asarray(shells_info['z_far']) > 0.0)
+    )
+    if not len(shell_indices):
+        raise ValueError("No simulation shells intersect the requested redshift range")
 
     Lbox_Mpc = sims_parameters['dBoxSize Mpc/h']/ sims_parameters['h']
 
@@ -247,160 +330,141 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift = 1.5, halo_snap
 
     
     
-    # Initialize the final catalog dictionary
-    final_cat = {
-        'pix_16384_ring' : [],
-        'x': [],
-        'y': [],
-        'z': [],
-        'M': [],
-        'M200c': [],
-        'redshift': [],
-        'R': [],
-        'R200c': [],
-        'ra': [],
-        'dec': [],
-        'redshift_hr': [],
-        
-        
-        
-    }
-    
-    count = 0
-   
-    # Iterate through each step in the halo catalog
-    for i_ in frogress.bar(np.arange(0, max_step_halocatalog)):
-        i = len(shells_info['Step']) - i_ - 1
-        d_min = shells_info['cmd_near'][i]
-        d_max = shells_info['cmd_far'][i]
-        step = shells_info['Step'][i]
+    partial_path = f"{os.fspath(catalog_path)}.partial"
+    if os.path.exists(partial_path):
+        raise FileExistsError(
+            f"Incomplete output already exists: {partial_path}. "
+            "Inspect or remove it before restarting."
+        )
 
-        # Load the snapshot data for the current step
-        output_ = load_snapshot(halo_snapshots_path, step, Lbox_Mpc, sims_parameters,log10_mass_limit = log10_mass_limit)
+    writer = None
+    total_rows = 0
+    try:
+        # Preserve the historical row ordering: shell, replica, source row.
+        for i in frogress.bar(shell_indices[::-1]):
+            d_min = max(0.0, float(shells_info['cmd_near'][i]))
+            d_max = min(
+                float(shells_info['cmd_far'][i]),
+                maximum_distance,
+            )
+            if d_max <= d_min:
+                continue
+            step = shells_info['Step'][i]
+
+            output_ = load_snapshot(
+                halo_snapshots_path,
+                step,
+                Lbox_Mpc,
+                sims_parameters,
+                log10_mass_limit=log10_mass_limit,
+                include_ia_shapes=include_ia_shapes,
+            )
+            shell_index = len(shells_info['Step']) - 1 - i
+            replicas_max = int(np.ceil(d_max / Lbox_Mpc))
+
+            for x_i in range(-replicas_max, replicas_max):
+                for y_i in range(-replicas_max, replicas_max):
+                    for z_i in range(-replicas_max, replicas_max):
+                        may_intersect, _, _ = may_intersect_sphere(
+                            x_i, y_i, z_i, Lbox_Mpc, d_min, d_max
+                        )
+                        if not may_intersect:
+                            continue
+
+                        new_x = output_['x'] + x_i * Lbox_Mpc
+                        new_y = output_['y'] + y_i * Lbox_Mpc
+                        new_z = output_['z'] + z_i * Lbox_Mpc
+                        radius = np.sqrt(new_x**2 + new_y**2 + new_z**2)
+                        mask = (radius >= d_min) & (radius < d_max)
+                        if not np.any(mask):
+                            continue
+
+                        selected_x = new_x[mask]
+                        selected_y = new_y[mask]
+                        selected_z = new_z[mask]
+                        selected_radius = radius[mask]
+                        ra = np.degrees(
+                            np.arctan2(selected_y, selected_x)
+                        ) % 360.0
+                        sin_dec = np.divide(
+                            selected_z,
+                            selected_radius,
+                            out=np.zeros_like(selected_z),
+                            where=selected_radius > 0,
+                        )
+                        dec = np.degrees(
+                            np.arcsin(np.clip(sin_dec, -1.0, 1.0))
+                        )
+                        columns = {
+                            'pix_16384_ring': hp.vec2pix(
+                                16384,
+                                selected_x,
+                                selected_y,
+                                selected_z,
+                                nest=False,
+                            ).astype(np.uint32),
+                            'log_M': np.asarray(output_['M'][mask], dtype=np.uint16),
+                            'R': np.asarray(output_['rhalf'][mask], dtype=np.uint16),
+                            'redshift': np.asarray(
+                                interpolated_distance_to_redshift(selected_radius)
+                                * 10000.0,
+                                dtype=np.uint16,
+                            ),
+                            'ra_deg': ra.astype(np.float32),
+                            'dec_deg': dec.astype(np.float32),
+                            'shell_index': np.full(len(ra), shell_index, dtype=np.uint16),
+                            'simulation_step': np.full(len(ra), step, dtype=np.int32),
+                            'catalogue_index': np.arange(
+                                total_rows, total_rows + len(ra), dtype=np.uint64),
+                        }
+                        if include_ia_shapes:
+                            ellipticity, shape_valid = project_inertia_tensor(
+                                ra, dec, output_['inertia_tensor'][mask])
+                            encoded_e1, encoded_e2 = encode_halo_ellipticity(
+                                ellipticity, shape_valid)
+                            columns.update({
+                                'host_e1_x10000': encoded_e1,
+                                'host_e2_x10000': encoded_e2,
+                                'shape_valid': shape_valid.astype(bool),
+                            })
+                        if 'M200c' in output_:
+                            columns['log_M200c_SO'] = np.asarray(
+                                output_['M200c'][mask], dtype=np.uint16
+                            )
+                            columns['R200c_S0'] = np.asarray(
+                                output_['r200c'][mask], dtype=np.uint16
+                            )
+
+                        table = pa.table(columns)
+                        if writer is None:
+                            writer = pq.ParquetWriter(
+                                partial_path,
+                                table.schema,
+                                compression='snappy',
+                            )
+                        elif table.schema != writer.schema:
+                            raise ValueError(
+                                "Halo snapshot schemas changed while assembling "
+                                "the lightcone"
+                            )
+                        writer.write_table(table, row_group_size=1_000_000)
+                        total_rows += len(table)
+
+            del output_
+            gc.collect()
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if total_rows == 0:
+        raise ValueError("No halos intersected the requested lightcone")
+    if pq.ParquetFile(partial_path).metadata.num_rows != total_rows:
+        raise RuntimeError("Incomplete streamed halo catalogue")
+
+    os.replace(partial_path, catalog_path)
+    print(f"Done assembling {total_rows} halo occurrences")
 
 
-        replicas_max = np.ceil(d_max / Lbox_Mpc).astype(int)
-        replicas_min = np.ceil(d_min / Lbox_Mpc).astype(int)
-
-
-        count_i = 0
-        add = 0
-
-        f = 1.0
-        
-        final_cat_x = []
-        final_cat_y = []
-        final_cat_z = []
-        final_cat_M = []
-        final_cat_R = []
-        final_cat_redshift = []
-        final_cat_M200c = []
-        final_cat_R200c = []
-        # Iterate through replicas
-        for x_i in range(-replicas_max, replicas_max ):
-            for y_i in range(-replicas_max , replicas_max ):
-                for z_i in range(-replicas_max , replicas_max ):
-                    may_intersect, close_box,far_box = may_intersect_sphere(x_i, y_i, z_i, Lbox_Mpc ,d_min, d_max)
-                        
-                    if may_intersect:
-                            new_x = output_['x'] + x_i * Lbox_Mpc
-                            new_y = output_['y'] + y_i * Lbox_Mpc
-                            new_z = output_['z'] + z_i * Lbox_Mpc
-                            r = np.sqrt(new_x**2 + new_y**2 + new_z**2)
-                            mask = (r >= d_min) & (r < d_max)
-                            if np.any(mask):
-                                final_cat_x.append(new_x[mask])
-                                final_cat_y.append(new_y[mask])
-                                final_cat_z.append(new_z[mask])
-                                final_cat_M.append(output_['M'][mask])
-                                final_cat_R.append(output_['rhalf'][mask])
-                                try:
-                                    final_cat_M200c.append(output_['M200c'][mask])
-                                    final_cat_R200c.append(output_['r200c'][mask])
-                                except:
-                                    pass
-                                final_cat_redshift.append(interpolated_distance_to_redshift(r[mask]))
-                            add += 1
-         
-                            
-                            
-
-        # Append collected data from this step to the final catalog
-        if len(final_cat_x)>0:
-            final_cat['pix_16384_ring'].append(hp.pixelfunc.vec2pix(8192 * 2, np.concatenate(final_cat_x), np.concatenate(final_cat_y), np.concatenate(final_cat_z), nest=False))
-            final_cat['M'].append(np.concatenate(final_cat_M) )
-            final_cat['R'].append(np.concatenate(final_cat_R) )
-            final_cat['redshift'].append(np.concatenate(final_cat_redshift) * 10000)
-            try:
-                final_cat['M200c'].append(np.concatenate(final_cat_M200c) )
-                final_cat['R200c'].append(np.concatenate(final_cat_R200c) )
-            except:
-                pass
-    for key in final_cat:
-        if isinstance(final_cat[key], list):
-            final_cat[key] = np.concatenate(final_cat[key]) if final_cat[key] else np.array([])
-
-    # Save the final catalog to a FITS file
-    if os.path.exists(catalog_path):
-        os.remove(catalog_path)
-
-    print ('Done assemblying')
-    
-    fits_f = dict()
-    fits_f['pix_16384_ring'] = (final_cat['pix_16384_ring']).astype('uint32')
-    fits_f['log_M'] = (final_cat['M']).astype('uint16')  # this is Msun/h ---
-    fits_f['R'] = (final_cat['R']).astype('uint16')
-    fits_f['redshift'] = (final_cat['redshift']).astype('uint16')
-    if len(final_cat['M200c'])>0:
-        fits_f['log_M200c_SO'] = (final_cat['M200c']).astype('uint16')  # this is Msun/h ---
-        fits_f['R200c_S0'] = (final_cat['R200c']).astype('uint16')
- 
-    
-    df = pd.DataFrame(fits_f)
-
-    # Save it as a Parquet file
-    df.to_parquet(catalog_path, index=False)
-
-    # Clean up
-    del final_cat
-    gc.collect()
-
-
-
-def reconstruct_inertia_tensor_halo_snapshot(df):
-    """
-    Reconstructs the original 6-component inertia tensor from
-    inertia_auto and inertia_cross columns in a DataFrame.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame with 'inertia_auto' and 'inertia_cross' columns.
-
-    Returns
-    -------
-    inertia : np.ndarray of shape (N, 6)
-        Reconstructed inertia tensor per halo, in the order:
-        [Ixx, Ixy, Ixz, Iyy, Iyz, Izz]
-    """
-
-    # Convert stored lists back to arrays
-    inertia_auto_log = np.stack(df['inertia_auto'].apply(np.array).to_numpy())
-    inertia_cross_scaled = np.stack(df['inertia_cross'].apply(np.array).to_numpy())
-
-    # Invert transformation for auto components: Ixx, Iyy, Izz
-    principal_moments = 10**(inertia_auto_log.astype(float) / 1000) / 1e20
-    Ixx, Iyy, Izz = principal_moments[:, 0], principal_moments[:, 1], principal_moments[:, 2]
-
-    # Invert transformation for cross components: Ixy, Ixz, Iyz
-    cross = inertia_cross_scaled.astype(float) / 10000 - 1
-    Ixy = cross[:, 0] * np.sqrt(Ixx * Iyy)
-    Ixz = cross[:, 1] * np.sqrt(Ixx * Izz)
-    Iyz = cross[:, 2] * np.sqrt(Iyy * Izz)
-
-    # Stack into (N, 6) array in the original order
-    inertia = np.stack([Ixx, Ixy, Ixz, Iyy, Iyz, Izz], axis=1)
-    return inertia
 
 def reconstruct_angular_halo_snapshot(df):
     """
@@ -425,6 +489,7 @@ def reconstruct_angular_halo_snapshot(df):
     magnitude = (10**(np.abs(angular_encoded) / 1000) - 1) / 1e20
     angular = sign * magnitude
     return angular
+
 
 def recover_halo_mass(df, preferred_mass_col=None):
       if preferred_mass_col is not None and preferred_mass_col in df.columns:
@@ -452,7 +517,8 @@ def recover_halo_mass(df, preferred_mass_col=None):
       if np.any(good) and np.nanmin(vals[good]) / 1000 < 10:
           return 10.0 ** (vals / 1000.0 + 4.0)
       return 10.0 ** (vals / 1000.0)
-      
+
+
 def recover_halo_redshift(df):
     """
     Recover redshift from scaled df['redshift'] values.
@@ -519,6 +585,8 @@ def recover_halo_radec(df, nest=False):
     dec, ra : np.ndarray
         Declination and Right Ascension in degrees.
     """
+    if "ra_deg" in df.columns and "dec_deg" in df.columns:
+        return df["ra_deg"].to_numpy(), df["dec_deg"].to_numpy()
     theta, phi = hp.pix2ang(16384, df['pix_16384_ring'].to_numpy(), nest=nest)
     dec = np.degrees(0.5 * np.pi - theta)
     ra = np.degrees(phi)
@@ -531,6 +599,8 @@ def load_halo_catalog(
     sims_parameters: Dict[str, float],
     halo_catalog_log10mass_cut: float,
     no_calib: True,
+    shell_index=None,
+    verbose=True,
 ):
     """
     Load a halo catalog, convert FoF masses to M200c (via Colossus-based calibrator),
@@ -554,30 +624,58 @@ def load_halo_catalog(
     halos : dict of np.ndarray
         Keys: 'M' (M200c, Msun/h), 'z', 'ra', 'dec'.
     """
-    # (Optional) configure Colossus cosmology
-    colossus_cosmology.addCosmology('my_cosmo', colossus_pars)
-    colossus_cosmology.setCosmology('my_cosmo')
+    # Colossus is only needed for the FoF -> M200c calibration.
+    if not no_calib:
+        colossus_cosmology.addCosmology('my_cosmo', colossus_pars)
+        colossus_cosmology.setCosmology('my_cosmo')
 
-    # Load catalog
-    df = pd.read_parquet(path_halo_cat, engine="pyarrow")
-    has_native_m200c = "log10M200c" in df.columns
+    # Read only columns used downstream. A shell filter enables Parquet
+    # row-group pruning for catalogues written by ``save_halocatalog``.
+    available = set(pq.ParquetFile(path_halo_cat).schema_arrow.names)
+    columns = ['log_M', 'redshift']
+    columns += ['ra_deg', 'dec_deg'] if {'ra_deg', 'dec_deg'} <= available else ['pix_16384_ring']
+    optional = ['log_M200c_SO', 'host_e1_x10000', 'host_e2_x10000',
+                'inertia_e1', 'inertia_e2', 'shape_valid', 'shell_index',
+                'simulation_step', 'catalogue_index']
+    columns += [name for name in optional if name in available]
+    filters = None
+    if shell_index is not None:
+        if 'shell_index' not in available:
+            raise KeyError("The halo catalogue has no shell_index column")
+        filters = [('shell_index', '==', int(shell_index))]
+    df = pd.read_parquet(path_halo_cat, columns=columns, filters=filters, engine="pyarrow")
+    has_native_m200c = "log_M200c_SO" in df.columns
     if has_native_m200c:
-        M200c_SO = recover_halo_mass(df, preferred_mass_col="log10M200c")
- 
+        M200c_SO = recover_halo_mass(df, preferred_mass_col="log_M200c_SO")
+
 
 
 
     # Recover base fields
-    M_fof = recover_halo_mass(df)          # Msun/h
+    M_fof = recover_halo_mass(df,preferred_mass_col = 'log_M')          # Msun/h
     z     = recover_halo_redshift(df)
     ra, dec = recover_halo_radec(df)
+    has_halo_shape = (
+        (
+            "host_e1_x10000" in df.columns
+            and "host_e2_x10000" in df.columns
+        )
+        or (
+            "inertia_e1" in df.columns
+            and "inertia_e2" in df.columns
+        )
+    ) and "shape_valid" in df.columns
+    if has_halo_shape:
+        host_ellipticity, shape_valid = recover_halo_ellipticity(df)
 
     # Convert FoF -> SO (M200c); important for tSZ, neutral for large-scale baryonification
     if no_calib:
-        print ('no calib')
+        if verbose:
+            print('no calib')
         M200c = copy.deepcopy(M_fof)
     else:
-        print ('extra calib [fof -> SO]')
+        if verbose:
+            print('extra calib [fof -> SO]')
         interpolator_calib = build_fof_to_m200c_interpolator(
             sims_parameters, colossus_cosmology)
         coords = np.column_stack([np.log10(M_fof), z])
@@ -588,7 +686,7 @@ def load_halo_catalog(
 
     if has_native_m200c:
         halos = {
-            "M_SO":   M200c[M200c_SO],
+            "M_SO":   M200c_SO[mask],
             "M":   M200c[mask],
             "z":   z[mask],
             "ra":  ra[mask],
@@ -601,6 +699,15 @@ def load_halo_catalog(
             "ra":  ra[mask],
             "dec": dec[mask],
         }
+    if has_halo_shape:
+        halos.update({
+            "host_e1": host_ellipticity.real[mask],
+            "host_e2": host_ellipticity.imag[mask],
+            "shape_valid": shape_valid[mask],
+        })
+    for name in ('shell_index', 'simulation_step', 'catalogue_index'):
+        if name in df.columns:
+            halos[name] = df[name].to_numpy()[mask]
     return halos
 
 

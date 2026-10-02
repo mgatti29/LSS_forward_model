@@ -284,7 +284,7 @@ def read_sims_params(path):
             if isinstance(m_ncdm, float):
                 m_ncdm = [m_ncdm]
             
-            h_dimless = params.get("h")
+            h_dimless = h = params.get("h")
             
             # compute Omega_nu from masses
             Omega_nu = float(m_ncdm.strip("'[").strip("']")) / (93.14 * h_dimless**2)
@@ -294,8 +294,8 @@ def read_sims_params(path):
             
             # w0, wa
             w0 = params.get("w0_fld", -1.0)
-            wa = params.get("wa_fld", 0.)   # not present in your file
-        
+            wa = params.get("wa_fld", 0.) # not present in your file
+
         
             # ---- read control.par (A_s, n_s, box)
             values = {}
@@ -354,6 +354,7 @@ def read_sims_params(path):
     pars_camb.WantTransfer = True
 
 
+
     # ---- CCL cosmology
     cosmo_pyccl = ccl.Cosmology(
     w0=sims_parameters['w0'],
@@ -386,10 +387,23 @@ def read_sims_params(path):
         'wa': sims_parameters['wa'],
     }
 
+
     if abs(sims_parameters['wa']) > 0:
-         cosmo_astropy = Flatw0waCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], wa=sims_parameters['wa']) 
+         cosmo_astropy = Flatw0waCDM(
+             H0=sims_parameters['h'] * 100.0,
+             Om0=sims_parameters['Omega_m'],
+             Ob0=sims_parameters['Omega_b'],
+             w0=sims_parameters['w0'],
+             wa=sims_parameters['wa'],
+         )
     else:
-        cosmo_astropy = wCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], Ode0=1-sims_parameters['Omega_m'])
+        cosmo_astropy = wCDM(
+            H0=sims_parameters['h'] * 100.0,
+            Om0=sims_parameters['Omega_m'],
+            Ob0=sims_parameters['Omega_b'],
+            w0=sims_parameters['w0'],
+            Ode0=1 - sims_parameters['Omega_m'],
+        )
 
     
     
@@ -419,6 +433,7 @@ def make_cosmo_bundle(sims_parameters):
     pars_camb.WantTransfer = True
 
 
+
     # ---- CCL cosmology
     cosmo_kwargs = dict(
     w0=sims_parameters['w0'],
@@ -438,9 +453,8 @@ def make_cosmo_bundle(sims_parameters):
         }
     },
     )
-
     cosmo_pyccl = ccl.Cosmology(**cosmo_kwargs)
-    
+
     # ---- Colossus-friendly dict (no Colossus import here)
     colossus_params = {
         'flat': True,
@@ -454,9 +468,21 @@ def make_cosmo_bundle(sims_parameters):
     }
 
     if abs(sims_parameters['wa']) > 0:
-         cosmo_astropy = Flatw0waCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], wa=sims_parameters['wa']) 
+         cosmo_astropy = Flatw0waCDM(
+             H0=sims_parameters['h'] * 100.0,
+             Om0=sims_parameters['Omega_m'],
+             Ob0=sims_parameters['Omega_b'],
+             w0=sims_parameters['w0'],
+             wa=sims_parameters['wa'],
+         )
     else:
-        cosmo_astropy = wCDM(H0=sims_parameters['h']*100.0, Om0=sims_parameters['Omega_m'], w0=sims_parameters['w0'], Ode0=1-sims_parameters['Omega_m'])
+        cosmo_astropy = wCDM(
+            H0=sims_parameters['h'] * 100.0,
+            Om0=sims_parameters['Omega_m'],
+            Ob0=sims_parameters['Omega_b'],
+            w0=sims_parameters['w0'],
+            Ode0=1 - sims_parameters['Omega_m'],
+        )
 
     
 
