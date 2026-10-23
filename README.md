@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/lss-forward-model-banner-refined-fields.png" alt="An N-body cosmic web flowing into stylized weak-lensing, CMB-lensing, and thermal SZ fields" width="100%">
+  <img src="assets/lss-forward-model-banner-agora.png" alt="Matter, weak lensing with shear, CMB lensing and thermal SZ full-sky maps from the Agora simulation" width="100%">
 </p>
 
 <h1 align="center">LSS Forward Model</h1>
