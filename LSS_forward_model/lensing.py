@@ -131,10 +131,12 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
 
     Signal:
         g_t(p) = sum_i n_ti [w_sc,ti(p) gamma_i(p) + w_ta,ti(p) IA_i(p)] / D_t(p)      (IA_model 'NLA', 'deltaNLA')
-        g_t(p) = [sum_i n_ti w_sc,ti(p) gamma_i(p) + halo_IA_t(p)] / D_t(p)            (IA_model 'halo')
+        g_t(p) = sum_i n_ti w_sc,ti(p) gamma_i(p) / D_t(p) + I_t(p)                    (IA_model 'halo')
         D_t(p) = sum_i n_ti w_sc,ti(p)
     with the source-clustering weight w_sc = 1 + b_t [1 + s_t (z_i - zbar_t)] delta_i (bias_sc,
-    bias_sc_slope) and w_ta = 1 + bias_TA_t delta_i ('deltaNLA') or 1 ('NLA').
+    bias_sc_slope) and w_ta = 1 + bias_TA_t delta_i ('deltaNLA') or 1 ('NLA').  The halo IA field I_t
+    (sum of the model shapes over the mean number of survey sources, halo_ia.make_halo_IA_numerator) is a
+    separate term, not divided by the source-clustering modulation D_t, as in its validation.
 
     Noise: the data shapes are randomly rotated and, per galaxy, scaled so that the noise variance of
     each pixel is modulated by h(lam D) / h(lam) (noise_model='poisson'), h(x) = E[1/N | N > 0] for a
@@ -180,7 +182,8 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
     ia_noise_nside : int or None
         NSIDE of the superpixels on which the expected halo IA self term is computed (None: per pixel).
     ia_numerator : complex array (ntomo, npix), optional
-        Previous interface for an external halo IA numerator: IA_model='halo' without noise subtraction.
+        Previous interface for an external IA numerator: added to the signal numerator and divided by D
+        (as before), without noise subtraction.
 
     Returns
     -------
@@ -195,6 +198,7 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
     sims_parameters.setdefault('rot', 0)
     sims_parameters.setdefault('delta_rot', 0)
 
+    ia_numerator_in_ratio = ia_numerator is not None
     if ia_numerator is not None:
         IA_model = 'halo'
         halo_IA = {'numerator': np.asarray(ia_numerator, dtype=np.complex128)}
@@ -251,10 +255,11 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
                 g1_tot[tomo] += ngal_glass[tomo, i] * w_ta * g1_IA
                 g2_tot[tomo] += ngal_glass[tomo, i] * w_ta * g2_IA
 
-        if IA_model == 'halo':
-            # the halo IA sources carry their own clustering: no source-clustering weight
+        if ia_numerator_in_ratio:
+            # previous interface: external IA numerator inside the source-clustering ratio
             g1_tot[tomo] += halo_IA['numerator'][tomo].real
             g2_tot[tomo] += halo_IA['numerator'][tomo].imag
+
 
     # observed fraction of each pixel, for the expected source counts of the Poisson noise model
     fracdet = None
@@ -303,32 +308,31 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
         g1_map[mask_sims] = np.bincount(pix, weights=g1_tot[tomo][pix]*w, minlength=npix)[mask_sims]/n_map_sc[mask_sims]
         g2_map[mask_sims] = np.bincount(pix, weights=g2_tot[tomo][pix]*w, minlength=npix)[mask_sims]/n_map_sc[mask_sims]
 
+        # halo IA: separate term (the model sources carry their own clustering), not divided by D
+        if IA_model == 'halo' and not ia_numerator_in_ratio:
+            g1_map[mask_sims] += halo_IA['numerator'][tomo].real[mask_sims]
+            g2_map[mask_sims] += halo_IA['numerator'][tomo].imag[mask_sims]
+
         # variance / kurtosis rescaling of the noise
         var_ = e1r_map0_ref**2 + e2r_map0_ref**2
         noise_factor = 1/(np.sqrt(A_corr_array[tomo]*corr_variance_array[tomo])) * np.sqrt((1+coeff_kurtosis_array[tomo]*var_))
 
         # halo IA: remove its white variance (already in the data shapes) from the noise
-        #   factor(p) = sqrt(1 - var_IA(p) / var_noise(p)),  var_IA = 0.5 <numerator_sq> / D^2
-        # <numerator_sq> is the expected IA self term: numerator_sq / D averaged on NSIDE ia_noise_nside
-        # superpixels, times D (at low z most pixels hold no model source), normalised to the realised
-        # total over the footprint.
+        #   factor(p) = sqrt(1 - var_IA(p) / var_noise(p)),  var_IA = 0.5 <numerator_sq>
+        # <numerator_sq> is the expected IA self term: numerator_sq averaged on NSIDE ia_noise_nside
+        # superpixels (at low z most pixels hold no model source), normalised to the realised total over
+        # the footprint.
         ia_noise_factor = np.ones(npix)
         if IA_model == 'halo' and subtract_IA_noise:
             e_sq = cats_Euclid[tomo]['e1']**2 + cats_Euclid[tomo]['e2']**2
             var_noise = np.zeros(npix)
             var_noise[mask_sims] = 0.5 * noise_factor[mask_sims]**2 * np.bincount(pix, weights=(w*noise_scale)**2*e_sq, minlength=npix)[mask_sims]/n_map_sc[mask_sims]**2
             numerator_sq = halo_IA['numerator_sq'][tomo]
-            good = d_tot[tomo] > 0
             if ia_noise_nside is not None:
-                per_density = np.zeros(npix)
-                per_density[good] = numerator_sq[good]/d_tot[tomo][good]
-                expected = hp.ud_grade(hp.ud_grade(per_density, ia_noise_nside), nside_maps) * d_tot[tomo]
-                realised_total = np.sum(numerator_sq[good & mask_sims]/d_tot[tomo][good & mask_sims]**2)
-                expected_total = np.sum(expected[good & mask_sims]/d_tot[tomo][good & mask_sims]**2)
-                if expected_total > 0:
-                    numerator_sq = expected * realised_total/expected_total
-            var_IA = np.zeros(npix)
-            var_IA[good] = 0.5 * numerator_sq[good]/d_tot[tomo][good]**2
+                expected = hp.ud_grade(hp.ud_grade(numerator_sq, ia_noise_nside), nside_maps)
+                if np.sum(expected[mask_sims]) > 0:
+                    numerator_sq = expected * np.sum(numerator_sq[mask_sims])/np.sum(expected[mask_sims])
+            var_IA = 0.5 * numerator_sq
             ratio = np.zeros(npix)
             ratio[mask_sims] = var_IA[mask_sims]/var_noise[mask_sims]
             ia_noise_factor[mask_sims] = np.sqrt(np.clip(1 - ratio[mask_sims], 0., 1.))
@@ -353,9 +357,14 @@ def make_WL_sample(ngal_glass, zeff_glass, cosmo_bundle, sims_parameters, nside_
                 maps_sim[tomo]['ia_noise_factor'] = ia_noise_factor
 
         if do_catalog:
-            # per galaxy: signal g_tot / D, noise rescaled as the pixel maps
-            e1_SC = sims_parameters['dm'][tomo] * g1_tot[tomo][pix]/d_gal + es1a * noise_factor[pix]/d_gal
-            e2_SC = sims_parameters['dm'][tomo] * g2_tot[tomo][pix]/d_gal + es2a * noise_factor[pix]/d_gal
+            # per galaxy: signal g_tot / D (+ halo IA), noise rescaled as the pixel maps
+            g1_gal = g1_tot[tomo][pix]/d_gal
+            g2_gal = g2_tot[tomo][pix]/d_gal
+            if IA_model == 'halo' and not ia_numerator_in_ratio:
+                g1_gal = g1_gal + halo_IA['numerator'][tomo].real[pix]
+                g2_gal = g2_gal + halo_IA['numerator'][tomo].imag[pix]
+            e1_SC = sims_parameters['dm'][tomo] * g1_gal + es1a * noise_factor[pix]/d_gal
+            e2_SC = sims_parameters['dm'][tomo] * g2_gal + es2a * noise_factor[pix]/d_gal
             cats_sim[tomo] = {'ra':cats_Euclid[tomo]['ra'],'dec':cats_Euclid[tomo]['dec'],'e1':e1_SC,'e2':e2_SC,'w':w}
 
     return maps_sim, cats_sim
