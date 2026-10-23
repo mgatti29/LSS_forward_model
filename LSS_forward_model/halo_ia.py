@@ -26,6 +26,7 @@ __all__ = [
     "expected_counts_in_redshift_bins",
     "inverse_profile",
     "iter_IA_halo_sources",
+    "make_halo_IA_numerator",
     "occupation",
     "pixelize_shapes",
     "populate_IA_halo_shell",
@@ -38,6 +39,7 @@ __all__ = [
     "sky_basis",
     "transport_phase",
     "unpack_inertia_tensor",
+    "virtual_halo_counts",
 ]
 
 
@@ -156,11 +158,20 @@ def recover_halo_ellipticity(data):
 # Halo occupation and target redshift distribution
 # ------------------------------------------------
 
-def occupation(mass, target_count, f_sat, sigma=0.2, alpha=1.0, f_c=1.0):
+def occupation(mass, target_count, f_sat, sigma=0.2, alpha=1.0, f_c=1.0,
+               virtual_log10_mass=None, virtual_count=None):
     """Return central probabilities and mean satellite occupations.
 
     ``target_count`` is enforced in expectation. Centrals follow a softened
     mass threshold, while satellites use a central-gated power law.
+
+    Virtual halos (``virtual_log10_mass``, ``virtual_count``: mass-bin centres
+    and expected number of halos per bin below the catalogue mass cut, e.g.
+    from ``virtual_halo_counts``) are counted but never placed. They enter the
+    abundance matching of M_min and the satellite normalisation, so that the
+    threshold is that of the full mass function; the galaxies they would host
+    are not returned. ``metadata['hosted_fraction']`` is the expected fraction
+    of ``target_count`` hosted by the catalogue halos (1 without virtual halos).
     """
     mass = np.asarray(mass, dtype=float)
     if mass.ndim != 1 or np.any(~np.isfinite(mass) | (mass <= 0)):
@@ -172,38 +183,104 @@ def occupation(mass, target_count, f_sat, sigma=0.2, alpha=1.0, f_c=1.0):
     if not np.isfinite(f_c) or not 0 < f_c <= 1:
         raise ValueError("Require 0 < f_c <= 1")
 
+    if virtual_log10_mass is None:
+        virtual_log10_mass, virtual_count = np.zeros(0), np.zeros(0)
+    virtual_log10_mass = np.asarray(virtual_log10_mass, dtype=float)
+    virtual_count = np.asarray(virtual_count, dtype=float)
+    if virtual_log10_mass.shape != virtual_count.shape or np.any(virtual_count < 0):
+        raise ValueError("virtual_log10_mass and virtual_count must match and be nonnegative")
+
     expected_central = (1 - f_sat) * target_count
     expected_satellite = f_sat * target_count
-    if expected_central >= f_c * len(mass) and target_count > 0:
+    if expected_central >= f_c * (len(mass) + virtual_count.sum()) and target_count > 0:
         raise ValueError("Central abundance has no finite threshold on eligible halos")
     if target_count == 0:
         metadata = dict(log10_Mmin=None, A_sat=None, expected_central=0.0,
                         expected_satellite=0.0, target_count=0.0, f_sat=f_sat,
-                        sigma_logM=sigma, alpha=alpha, f_c=f_c)
+                        sigma_logM=sigma, alpha=alpha, f_c=f_c, hosted_fraction=1.0)
         return np.zeros(len(mass)), np.zeros(len(mass)), metadata
 
     log10_mass = np.log10(mass)
 
-    def central_probability(threshold):
-        return f_c * ndtr(np.sqrt(2) * (log10_mass - threshold) / sigma)
+    def central_probability(log10_m, threshold):
+        return f_c * ndtr(np.sqrt(2) * (log10_m - threshold) / sigma)
+
+    def central_total(threshold):
+        return (central_probability(log10_mass, threshold).sum()
+                + np.sum(virtual_count * central_probability(virtual_log10_mass, threshold)))
 
     # Solve M_min so that the expected central abundance closes exactly.
-    threshold = brentq(lambda value: central_probability(value).sum() - expected_central,
-                       log10_mass.min() - 40 * sigma, log10_mass.max() + 40 * sigma,
-                       xtol=1e-12)
-    central = central_probability(threshold)
+    lowest = min(log10_mass.min(), virtual_log10_mass.min()) if len(virtual_count) else log10_mass.min()
+    threshold = brentq(lambda value: central_total(value) - expected_central,
+                       lowest - 40 * sigma, log10_mass.max() + 40 * sigma, xtol=1e-12)
+    central = central_probability(log10_mass, threshold)
+    central_virtual = virtual_count * central_probability(virtual_log10_mass, threshold)
 
     # Normalize the satellite power law independently to the requested fraction.
     satellite_shape = central * 10 ** (alpha * (log10_mass - threshold))
-    amplitude = expected_satellite / satellite_shape.sum() if expected_satellite else 0.0
+    satellite_shape_virtual = central_virtual * 10 ** (alpha * (virtual_log10_mass - threshold))
+    normalisation = satellite_shape.sum() + satellite_shape_virtual.sum()
+    amplitude = expected_satellite / normalisation if expected_satellite else 0.0
     satellite = amplitude * satellite_shape
-    np.testing.assert_allclose([central.sum(), satellite.sum()],
-                               [expected_central, expected_satellite], rtol=1e-9, atol=1e-7)
+    np.testing.assert_allclose(
+        [central.sum() + central_virtual.sum(), satellite.sum() + amplitude * satellite_shape_virtual.sum()],
+        [expected_central, expected_satellite], rtol=1e-9, atol=1e-7)
     metadata = dict(log10_Mmin=float(threshold), A_sat=float(amplitude),
                     expected_central=float(central.sum()),
                     expected_satellite=float(satellite.sum()), target_count=float(target_count),
-                    f_sat=f_sat, sigma_logM=sigma, alpha=alpha, f_c=f_c)
+                    f_sat=f_sat, sigma_logM=sigma, alpha=alpha, f_c=f_c,
+                    hosted_fraction=float((central.sum() + satellite.sum()) / target_count))
     return central, satellite, metadata
+
+
+def virtual_halo_counts(cosmo, lower_redshift, upper_redshift, log10_mass_cut,
+                        mass_def="fof", log10_mass_min=9.0, dlog10_mass=0.02, n_redshift=8):
+    """Expected number of halos below the catalogue mass cut in a full-sky shell.
+
+    Parameters
+    ----------
+    cosmo : pyccl.Cosmology
+        Cosmology of the simulation.
+    lower_redshift, upper_redshift : float
+        Redshift range of the shell.
+    log10_mass_cut : float
+        log10 of the catalogue mass cut [physical Msun]; halos above it are in
+        the catalogue, the virtual halos fill the range below it.
+    mass_def : str
+        'fof' (Watson et al. 2013 FoF mass function, for FoF catalogue masses)
+        or '200c' (Tinker et al. 2008, for M200c catalogue masses).
+    log10_mass_min, dlog10_mass : float
+        Lower end and width of the log10-mass bins of the virtual halos.
+    n_redshift : int
+        Number of redshift samples for the integral over the shell volume.
+
+    Returns
+    -------
+    log10_mass : array
+        Bin centres [log10 physical Msun].
+    count : array
+        Expected number of halos per bin over the full sky.
+    """
+    import pyccl as ccl
+
+    if mass_def == "fof":
+        mass_function = ccl.halos.MassFuncWatson13(mass_def="fof")
+    elif mass_def == "200c":
+        mass_function = ccl.halos.MassFuncTinker08(mass_def="200c")
+    else:
+        raise ValueError("mass_def must be 'fof' or '200c'")
+    edges = np.arange(log10_mass_min, log10_mass_cut + 0.5 * dlog10_mass, dlog10_mass)
+    edges[-1] = log10_mass_cut
+    centres = 0.5 * (edges[1:] + edges[:-1])
+    redshift = np.linspace(lower_redshift, upper_redshift, n_redshift)
+    scale_factor = 1 / (1 + redshift)
+    # dn/dlog10M [Mpc^-3] at the bin centres, times the full-sky comoving volume per unit redshift
+    dn = np.array([mass_function(cosmo, 10**centres, a) for a in scale_factor])
+    chi = ccl.comoving_radial_distance(cosmo, scale_factor)
+    dvolume = 4 * np.pi * chi**2 * ccl.physical_constants.CLIGHT * 1e-3 / (
+        cosmo["H0"] * ccl.h_over_h0(cosmo, scale_factor))
+    count = np.trapz(dn * dvolume[:, None], redshift, axis=0) * np.diff(edges)
+    return centres, count
 
 
 def _integrate_piecewise_nz(redshift, nz, lower, upper):
@@ -467,7 +544,7 @@ def _concentration_200c_grid(H0, Om0, Ob0, sigma8, ns):
         dict(flat=True, H0=H0, Om0=Om0, Ob0=Ob0, sigma8=sigma8, ns=ns),
         persistence="",
     )
-    logmass, redshift = np.linspace(11, 17, 241), np.linspace(0, 3, 121)
+    logmass, redshift = np.linspace(10, 17, 281), np.linspace(0, 3, 121)
     values = np.empty((len(logmass), len(redshift)))
     try:
         for index, z in enumerate(redshift):
@@ -500,8 +577,13 @@ def concentration_200c(mass, redshift, cosmology, *, sigma8, ns):
 
 def populate_IA_halo_shell(halos, target_count, model_parameters, cosmo_bundle,
                            sims_parameters, rng, shell_index=None, quarter_turns=0,
-                           position_ellipticity_scale=1.0):
-    """Populate one halo shell without retaining any other shell in memory."""
+                           position_ellipticity_scale=1.0, virtual=None):
+    """Populate one halo shell without retaining any other shell in memory.
+
+    ``virtual`` is an optional (log10_mass, count) pair of halos below the
+    catalogue mass cut (``virtual_halo_counts``); see ``occupation``. Every
+    returned source carries the shell's ``hosted_fraction``.
+    """
     required = {"M", "z", "ra", "dec", "host_e1", "host_e2", "shape_valid"}
     missing = required.difference(halos)
     if missing:
@@ -516,9 +598,11 @@ def populate_IA_halo_shell(halos, target_count, model_parameters, cosmo_bundle,
 
     mass = halos["M_SO"] if "M_SO" in halos else halos["M"]
     population = model_parameters["population"]
-    central, satellite, _ = occupation(
+    virtual_log10_mass, virtual_count = (None, None) if virtual is None else virtual
+    central, satellite, metadata = occupation(
         mass, target_count, population["f_sat"], population["sigma_logM"],
-        population["alpha"], population["f_c"])
+        population["alpha"], population["f_c"],
+        virtual_log10_mass=virtual_log10_mass, virtual_count=virtual_count)
     cosmology = cosmo_bundle["cosmo_astropy"]
 
     # Draw occupations first, then evaluate profiles only for satellite hosts.
@@ -546,7 +630,8 @@ def populate_IA_halo_shell(halos, target_count, model_parameters, cosmo_bundle,
                  redshift=sources["redshift"], is_central=sources["is_central"],
                  e1=ia_unit.real, e2=ia_unit.imag,
                  host_catalogue_index=catalogue_index[source_host],
-                 host_mass=mass[source_host])
+                 host_mass=mass[source_host],
+                 hosted_fraction=np.full(len(source_host), metadata["hosted_fraction"], np.float32))
     if shell_index is not None:
         batch["shell_index"] = np.full(len(source_host), shell_index, np.uint16)
     return batch
@@ -554,11 +639,19 @@ def populate_IA_halo_shell(halos, target_count, model_parameters, cosmo_bundle,
 
 def build_IA_halo_sources(halos, total_number_counts, nz_redshift, nz, shells_info,
                           model_parameters, cosmo_bundle, sims_parameters, seed=913603,
-                          quarter_turns=0, position_ellipticity_scale=1.0):
+                          quarter_turns=0, position_ellipticity_scale=1.0,
+                          virtual_halos=True, log10_mass_cut=None):
     """Populate a compact halo lightcone with explicit centrals and satellites.
 
     The target n(z) fixes expected counts per redshift interval, so generated
     objects carry unit statistical weight at this stage.
+
+    With ``virtual_halos`` (default) the halos below the catalogue mass cut
+    ``log10_mass_cut`` [physical Msun; default: the lightest halo] are added
+    as counted-only virtual halos from the mass function of
+    ``cosmo_bundle['cosmo_pyccl']`` (``virtual_halo_counts``), so the
+    abundance matching does not run out of halos where the survey is denser
+    than the resolved halos; see ``occupation``.
     """
     required = {"M", "z", "ra", "dec", "host_e1", "host_e2", "shape_valid"}
     missing = required.difference(halos)
@@ -638,10 +731,16 @@ def build_IA_halo_sources(halos, total_number_counts, nz_redshift, nz, shells_in
             continue
         shell_halos = {name: np.asarray(value)[selection] for name, value in halos.items()}
         shell_halos["catalogue_index"] = np.asarray(catalogue_index[selection])
+        virtual = None
+        if virtual_halos:
+            cut = np.log10(np.min(halos["M"])) if log10_mass_cut is None else log10_mass_cut
+            virtual = virtual_halo_counts(cosmo_bundle["cosmo_pyccl"], max(0.0, z_near[shell_index]),
+                                          min(z_far[shell_index], max_redshift), cut,
+                                          mass_def="200c" if "M_SO" in halos else "fof")
         batches.append(populate_IA_halo_shell(
             shell_halos, target_count, model_parameters, cosmo_bundle, sims_parameters,
             rng, shell_index=shell_index, quarter_turns=quarter_turns,
-            position_ellipticity_scale=position_ellipticity_scale))
+            position_ellipticity_scale=position_ellipticity_scale, virtual=virtual))
 
     if not batches:
         raise ValueError("No IA sources were generated")
@@ -738,8 +837,16 @@ def _load_IA_halo_shell(path_halo_cat, shell_index, log10_mass_cut,
 def iter_IA_halo_sources(path_halo_cat, sims_parameters, halo_catalog_log10mass_cut,
                           total_number_counts, nz_redshift, nz, shells_info,
                           model_parameters, cosmo_bundle, seed=913603, quarter_turns=0,
-                          position_ellipticity_scale=1.0):
-    """Yield populated IA sources one shell at a time from a Parquet catalogue."""
+                          position_ellipticity_scale=1.0, virtual_halos=True):
+    """Yield populated IA sources one shell at a time from a Parquet catalogue.
+
+    ``total_number_counts`` is the full-sky equivalent number of survey sources
+    (summed over tomographic bins) and ``nz`` their summed n(z). With
+    ``virtual_halos`` (default) halos below ``halo_catalog_log10mass_cut``
+    [physical Msun] are added as counted-only virtual halos from the mass
+    function of ``cosmo_bundle['cosmo_pyccl']`` (see ``occupation``); where the
+    catalogue holds enough halos they have no effect.
+    """
     nz_redshift, nz = np.asarray(nz_redshift, float), np.asarray(nz, float)
     support = np.isfinite(nz_redshift) & np.isfinite(nz) & (nz > 0)
     if not np.any(support):
@@ -768,10 +875,15 @@ def iter_IA_halo_sources(path_halo_cat, sims_parameters, halo_catalog_log10mass_
             if target_count > 0:
                 raise ValueError(f"No eligible IA hosts in shell {shell_index}")
             continue
+        virtual = None
+        if virtual_halos:
+            virtual = virtual_halo_counts(cosmo_bundle["cosmo_pyccl"], lower, upper,
+                                          halo_catalog_log10mass_cut,
+                                          mass_def="200c" if "M_SO" in halos else "fof")
         yield shell_index, populate_IA_halo_shell(
             halos, target_count, model_parameters, cosmo_bundle, sims_parameters,
             rng, shell_index=shell_index, quarter_turns=quarter_turns,
-            position_ellipticity_scale=position_ellipticity_scale)
+            position_ellipticity_scale=position_ellipticity_scale, virtual=virtual)
 
 
 def build_IA_halo_sources_from_catalog(*args, show_progress=True, **kwargs):
@@ -876,3 +988,132 @@ def build_halo_ia_maps(model_objects, density, ia_parameters, nside):
             'weights': weights, 'delta_source': delta_source,
             'ia_rotation_noise_variance': ia_rotation_noise_variance,
             'ia_rotation_noise_std': ia_rotation_noise_std}
+
+
+# Halo IA signal for the mock shear maps
+# --------------------------------------
+
+def make_halo_IA_numerator(model_objects, ia_parameters, density, ngal_glass, nside_maps,
+                           bin_counts=None, seed=0, random_orientation=False, orientation_seed=None):
+    """
+    Halo-model IA signal in the form used by lensing.make_WL_sample (IA_model='halo').
+
+    The halo-model sources (centrals and satellites populated in the halo lightcone) carry
+    their own clustering, so no source-clustering weight is applied to them.  The model is
+    populated once for all bins together; each model source in shell i is then assigned to one
+    tomographic bin t at random, with probability proportional to N_t n_t(z_i) (bin_counts and
+    ngal_glass), so that different bins contain different model galaxies, as in the data (bins
+    sharing the same sources would get a spurious white IA cross-correlation).  Each shell is
+    put in the same units as the NLA term by dividing by the full-sky mean number of survey
+    sources of the bin per pixel, Nbar_ti, and weighted with the survey n(z) weights:
+
+        numerator_t(p)    = sum_i  ngal_glass[t, i] / Nbar_ti     * sum_{k in bin t, shell i, pixel p} m_k
+        numerator_sq_t(p) = sum_i (ngal_glass[t, i] / Nbar_ti)**2 * sum_{k in bin t, shell i, pixel p} |m_k|**2
+
+    m_k is the IA shape of model source k, with the halo_ia.build_halo_ia_maps formula (amplitude,
+    redshift evolution and density response of centrals and satellites), in the observed
+    e1 + i e2 convention.  Nbar_ti is the number of model sources of the bin in the shell divided by
+    the shell's hosted fraction (the share of the survey sources hosted by catalogue halos, see
+    occupation; 1 without virtual halos), so that survey sources in virtual halos carry no IA and
+    dilute the signal.  Computed one shell at a time to keep the memory low.  numerator_sq gives the white (shot) variance of the IA map; that
+    variance is already contained in the shapes of the data catalogue, and lensing.make_WL_sample
+    removes it from the rotated noise.
+
+    Parameters
+    ----------
+    model_objects : dict
+        Output of build_IA_halo_sources_from_catalog (ra_deg, dec_deg, redshift, is_central,
+        shell_index, e1, e2, hosted_fraction).  Full sky, shell_index as in `density`.  Populate it
+        with the summed n(z) of all bins and the full-sky equivalent of the survey counts.
+    ia_parameters : dict
+        {'ia': {'A_c', 'eta_c', 'b_c', 'A_s', 'eta_s', 'b_s'}}.
+    density : array (nshell, npix)
+        Density shells used for the lensing fields (same order as zeff_glass).
+    ngal_glass : array (ntomo, nshell)
+        Survey n(z) weights per shell (after the dz shifts of this realisation).
+    nside_maps : int
+        NSIDE of the maps.
+    bin_counts : array (ntomo,), optional
+        Number of galaxies in each bin (e.g. len(cats[t]['e1'])); sets the share of model
+        sources of each bin.  None: every bin uses all the model sources (no split).
+    seed : int
+        Seed of the random assignment of model sources to bins.
+    random_orientation : bool
+        Rotate every mark by a random spin-2 phase: the coherent IA is destroyed and only the white
+        (self) part remains, with the same statistics as in the true map (for noise tests).  The bin
+        assignment is the same as without rotation (same seed).
+    orientation_seed : int or None
+        Seed of the random orientations.
+
+    Returns
+    -------
+    halo_IA : dict
+        'numerator'    complex array (ntomo, npix)
+        'numerator_sq' float array (ntomo, npix)
+    """
+    ngal_glass = np.asarray(ngal_glass, dtype=float)
+    ntomo, nshell = ngal_glass.shape
+    npix = hp.nside2npix(nside_maps)
+    if len(density) != nshell:
+        raise ValueError('density and ngal_glass must have the same number of shells')
+
+    shell_index = np.asarray(model_objects['shell_index'])
+    is_central = np.asarray(model_objects['is_central'], dtype=bool)
+    ia = ia_parameters['ia']
+    rng = np.random.default_rng(seed)
+    orientation_rng = np.random.default_rng(orientation_seed)
+
+    # the tomographic split of the model sources: p(t | shell) proportional to N_t n_t(z_shell)
+    if bin_counts is not None:
+        counts_per_shell = (ngal_glass/ngal_glass.sum(1, keepdims=True))*np.asarray(bin_counts, dtype=float)[:, None]
+        cumulative = np.cumsum(counts_per_shell, axis=0)
+        cumulative = cumulative/np.where(cumulative[-1] > 0, cumulative[-1], 1.)
+
+    # one shell at a time (sources are stored in shell order), to keep the memory low
+    ordered = np.all(shell_index[1:] >= shell_index[:-1])
+    numerator = np.zeros((ntomo, npix), dtype=np.complex128)
+    numerator_sq = np.zeros((ntomo, npix))
+    for i in np.unique(shell_index):
+        if ordered:
+            rows = slice(np.searchsorted(shell_index, i, side='left'), np.searchsorted(shell_index, i, side='right'))
+        else:
+            rows = np.flatnonzero(shell_index == i)
+        ra = np.asarray(model_objects['ra_deg'][rows], float)
+        dec = np.asarray(model_objects['dec_deg'][rows], float)
+        central = is_central[rows]
+
+        # IA marks, as in build_halo_ia_maps: A ((1+z)/1.67)^eta (1 + b delta) u
+        evolution = (1 + np.asarray(model_objects['redshift'][rows], float))/1.67
+        amplitude = np.where(central, ia['A_c']*evolution**ia['eta_c'], ia['A_s']*evolution**ia['eta_s'])
+        if ia['b_c'] != 0 or ia['b_s'] != 0:
+            delta = hp.get_interp_val(density[i], ra, dec, lonlat=True)
+            amplitude = amplitude*(1 + np.where(central, ia['b_c'], ia['b_s'])*delta)
+        marks = amplitude*(np.asarray(model_objects['e1'][rows]) + 1j*np.asarray(model_objects['e2'][rows]))
+        pixel = hp.ang2pix(nside_maps, ra, dec, lonlat=True)
+        if bin_counts is not None:
+            source_bin = np.sum(rng.random(len(pixel))[None, :] > cumulative[:-1, i][:, None], axis=0)
+        if random_orientation:
+            marks = marks*np.exp(2j*np.pi*orientation_rng.random(len(marks)))
+        # survey sources per model source in this shell (virtual halos: unhosted, no IA)
+        hosted = model_objects.get('hosted_fraction')
+        hosted_fraction = 1. if hosted is None else float(np.mean(np.asarray(hosted[rows], float)))
+
+        for tomo in range(ntomo):
+            use = slice(None) if bin_counts is None else source_bin == tomo
+            n_model = len(pixel) if bin_counts is None else np.count_nonzero(use)
+            if ngal_glass[tomo, i] == 0 or n_model == 0:
+                continue
+            nbar = n_model/hosted_fraction/npix
+            sum_m = (np.bincount(pixel[use], weights=marks[use].real, minlength=npix)
+                     + 1j*np.bincount(pixel[use], weights=marks[use].imag, minlength=npix))
+            sum_m2 = np.bincount(pixel[use], weights=np.abs(marks[use])**2, minlength=npix)
+            numerator[tomo] += ngal_glass[tomo, i]/nbar * sum_m
+            numerator_sq[tomo] += (ngal_glass[tomo, i]/nbar)**2 * sum_m2
+
+    # shells beyond the halo lightcone (or without model sources) get no IA
+    no_sources = np.ones(nshell, dtype=bool)
+    no_sources[np.unique(shell_index)] = False
+    weight_without_IA = ngal_glass[:, no_sources].sum(1)/ngal_glass.sum(1)
+    if np.any(weight_without_IA > 0.01):
+        print('halo IA: fraction of n(z) in shells without model sources:', np.round(weight_without_IA, 3))
+    return {'numerator': numerator, 'numerator_sq': numerator_sq}

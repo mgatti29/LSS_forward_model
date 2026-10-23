@@ -763,6 +763,82 @@ def build_shell_windows_and_partitions(
 
 #     return results
 
+def F_TT(z, om0, A2, rho_c1, eta=0.0, z0=0.0, cosmo=None):
+    z = np.asarray(z, dtype=float)
+    a = 1.0 / (1.0 + z)
+
+    if cosmo is None:
+        raise ValueError("Pass a pyccl.Cosmology as `cosmo`.")
+
+    D = ccl.growth_factor(cosmo, a)
+
+    return 5.0 * A2 * rho_c1 * om0 * ((1.0 + z) / (1.0 + z0))**eta / D**2
+
+
+def make_TT_from_delta(IA_array, delta_array, delta_chi=1.,clip = True):
+    """
+    Build the tidal-torquing (TT) intrinsic ellipticity field from the
+    projected density contrast and the TA IA field.
+
+    Parameters
+    ----------
+    IA_array : list/array
+        Complex TA IA maps. For each shell, IA_array[i][0] = Q + iU.
+    delta_array : list/array
+        Projected density maps for each shell.
+    delta_chi : float
+        Shell thickness.
+
+    Returns
+    -------
+    TT_array : list
+        Complex TT ellipticity maps, TT = TT1 + i TT2.
+    """
+    def bounded_delta(delta, clip=3.0, bounded=False):
+        delta = delta - np.mean(delta)
+        sigma = np.std(delta)
+    
+        x = delta / (sigma + 1e-30)
+    
+        if bounded:
+            return np.tanh(x)*sigma+ np.mean(delta)
+        else:
+            return np.clip(x, -clip, clip)*sigma
+
+    
+    TT_array = []
+
+    for IA_shell, delta_shell in zip(IA_array, delta_array):
+        delta = np.asarray(delta_shell, dtype=float)
+        delta = delta #- np.mean(delta)
+       # delta = bounded_delta(delta)
+        gamma_TA = IA_shell[0]
+        Q = gamma_TA.real
+        U = gamma_TA.imag
+
+        # Projected tidal tensor components
+        s11 = 0.5 * (delta + Q) - delta / 3.0
+        s22 = 0.5 * (delta - Q) - delta / 3.0
+        s12 = U
+
+        s11 /= delta_chi
+        s22 /= delta_chi
+        s12 /= delta_chi
+
+        # Tidal-torquing ellipticity
+        TT1 = s11**2 - s22**2 #= (s11+s22)*(s11-s22) ~ 0.5 * A delta *(Q) 
+        TT2 = -s12 * (s11 + s22) #~ A delta U
+
+      #  TT1 -= np.mean(TT1)
+      #  TT2 -= np.mean(TT2)
+
+        TT_array.append(TT1 + 1j * TT2)
+    TT_array = np.array(TT_array)
+    TT_array = TT_array.reshape(TT_array.shape[0],1,TT_array.shape[-1])
+
+    return np.array(TT_array)
+
+
 def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
                            do_kappa=True, do_shear=True, do_IA=False):
     """
