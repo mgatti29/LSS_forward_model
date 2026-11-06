@@ -14,6 +14,9 @@ from scipy.special import ndtr
 
 
 HALO_ELLIPTICITY_SCALE = 10000.0
+# sign of the halo IA field in make_halo_IA_numerator relative to the halo-shape convention, so that the
+# numerator is in the lensing convention of lensing.make_WL_sample (positive amplitudes = physical IA)
+PACKAGE_IA_SIGN = -1.0
 
 __all__ = [
     "HALO_ELLIPTICITY_SCALE",
@@ -159,7 +162,7 @@ def recover_halo_ellipticity(data):
 # ------------------------------------------------
 
 def occupation(mass, target_count, f_sat, sigma=0.2, alpha=1.0, f_c=1.0,
-               virtual_log10_mass=None, virtual_count=None):
+               virtual_log10_mass=None, virtual_count=None, cap=0.98):
     """Return central probabilities and mean satellite occupations.
 
     ``target_count`` is enforced in expectation. Centrals follow a softened
@@ -172,6 +175,12 @@ def occupation(mass, target_count, f_sat, sigma=0.2, alpha=1.0, f_c=1.0,
     threshold is that of the full mass function; the galaxies they would host
     are not returned. ``metadata['hosted_fraction']`` is the expected fraction
     of ``target_count`` hosted by the catalogue halos (1 without virtual halos).
+
+    If the requested centrals (1 - f_sat) target_count exceed what the halos
+    can host, f_c (N_halo + N_virtual) (tiny low-redshift shells, small f_c),
+    the hosted count is capped at ``cap`` times that capacity and the remaining
+    sources are unhosted (no IA; ``hosted_fraction`` < 1, ``metadata['capped']``).
+    ``cap=None`` raises instead.
     """
     mass = np.asarray(mass, dtype=float)
     if mass.ndim != 1 or np.any(~np.isfinite(mass) | (mass <= 0)):
@@ -190,14 +199,19 @@ def occupation(mass, target_count, f_sat, sigma=0.2, alpha=1.0, f_c=1.0,
     if virtual_log10_mass.shape != virtual_count.shape or np.any(virtual_count < 0):
         raise ValueError("virtual_log10_mass and virtual_count must match and be nonnegative")
 
+    requested_count = target_count
+    capacity = f_c * (len(mass) + virtual_count.sum())
+    capped = target_count > 0 and (1 - f_sat) * target_count >= capacity
+    if capped:
+        if cap is None:
+            raise ValueError("Central abundance has no finite threshold on eligible halos")
+        target_count = cap * capacity / (1 - f_sat)
     expected_central = (1 - f_sat) * target_count
     expected_satellite = f_sat * target_count
-    if expected_central >= f_c * (len(mass) + virtual_count.sum()) and target_count > 0:
-        raise ValueError("Central abundance has no finite threshold on eligible halos")
     if target_count == 0:
         metadata = dict(log10_Mmin=None, A_sat=None, expected_central=0.0,
                         expected_satellite=0.0, target_count=0.0, f_sat=f_sat,
-                        sigma_logM=sigma, alpha=alpha, f_c=f_c, hosted_fraction=1.0)
+                        sigma_logM=sigma, alpha=alpha, f_c=f_c, hosted_fraction=1.0, capped=False)
         return np.zeros(len(mass)), np.zeros(len(mass)), metadata
 
     log10_mass = np.log10(mass)
@@ -229,7 +243,8 @@ def occupation(mass, target_count, f_sat, sigma=0.2, alpha=1.0, f_c=1.0,
                     expected_central=float(central.sum()),
                     expected_satellite=float(satellite.sum()), target_count=float(target_count),
                     f_sat=f_sat, sigma_logM=sigma, alpha=alpha, f_c=f_c,
-                    hosted_fraction=float((central.sum() + satellite.sum()) / target_count))
+                    hosted_fraction=float((central.sum() + satellite.sum()) / requested_count),
+                    capped=bool(capped))
     return central, satellite, metadata
 
 
@@ -1048,7 +1063,8 @@ def make_halo_IA_numerator(model_objects, ia_parameters, density, ngal_glass, ns
     Returns
     -------
     halo_IA : dict
-        'numerator'    complex array (ntomo, npix)
+        'numerator'    complex array (ntomo, npix), in the lensing convention of make_WL_sample
+                       (marks multiplied by PACKAGE_IA_SIGN = -1: positive A_c, A_s are physical alignments)
         'numerator_sq' float array (ntomo, npix)
     """
     ngal_glass = np.asarray(ngal_glass, dtype=float)
@@ -1088,7 +1104,12 @@ def make_halo_IA_numerator(model_objects, ia_parameters, density, ngal_glass, ns
         if ia['b_c'] != 0 or ia['b_s'] != 0:
             delta = hp.get_interp_val(density[i], ra, dec, lonlat=True)
             amplitude = amplitude*(1 + np.where(central, ia['b_c'], ia['b_s'])*delta)
-        marks = amplitude*(np.asarray(model_objects['e1'][rows]) + 1j*np.asarray(model_objects['e2'][rows]))
+        # PACKAGE_IA_SIGN: the halo shapes (project_inertia_tensor) have the opposite E-mode sign to the
+        # lensing shear of make_WL_sample / make_BFD_sample (-gamma_GLASS); flip so that A_c, A_s > 0 are
+        # physical (radial) alignments, like NLA A_IA > 0 (des_decade_run/prior_tests/sign_check.py,
+        # gower_gi_calibration.py)
+        marks = PACKAGE_IA_SIGN*amplitude*(np.asarray(model_objects['e1'][rows])
+                                           + 1j*np.asarray(model_objects['e2'][rows]))
         pixel = hp.ang2pix(nside_maps, ra, dec, lonlat=True)
         if bin_counts is not None:
             source_bin = np.sum(rng.random(len(pixel))[None, :] > cumulative[:-1, i][:, None], axis=0)
