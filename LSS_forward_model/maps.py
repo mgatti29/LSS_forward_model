@@ -1,9 +1,6 @@
 from __future__ import annotations
 import numpy as np
 import glass
-import glass.fields
-import glass.lensing
-import glass.shells
 from typing import List, Tuple
 import pandas as pd
 import healpy as hp
@@ -88,10 +85,10 @@ def add_shells(camb_pars,nside_maps = 1024,missing_shells = None):
     
     cc =  [cls_[f'W{i}xW{j}'] for i in range(1, n+1) for j in range(i, 0, -1)]
     
-    cls = glass.fields.discretized_cls(cc, nside=nside_maps, lmax=lmax, ncorr=3)
-    fields = glass.fields.gaussian_fields(missing_shells)
+    cls = glass.discretized_cls(cc, nside=nside_maps, lmax=lmax, ncorr=3)
+    fields = glass.gaussian_fields(missing_shells)
     
-    matter = glass.fields.generate(fields, cls, nside_maps, ncorr=3)
+    matter = glass.generate(fields, cls, nside_maps, ncorr=3)
     maps = list(matter)        # length 15, one HEALPix map per shell
     return maps
 
@@ -106,16 +103,17 @@ def load_or_save_updated_params(path_sim, base_params_path, cache_filename, valu
     """
     base = np.load(base_params_path, allow_pickle=True).item()
 
-    if os.path.exists(path_sim+cache_filename):
+    cache_path = os.path.join(os.fspath(path_sim), os.fspath(cache_filename))
+    if os.path.exists(cache_path):
         if overwrite == False:
-            return tuple(np.load(path_sim+cache_filename, allow_pickle=True))
+            return tuple(np.load(cache_path, allow_pickle=True))
 
     sys = {}
     if values_to_update:
         for k, v in values_to_update.items():
             sys[k] = float(v)
     bpar = {**base, **sys}
-    np.save(path_sim+cache_filename, [bpar, sys])
+    np.save(cache_path, [bpar, sys])
     return bpar, sys
 
 
@@ -186,13 +184,14 @@ def baryonify_shell(halos, sims_parameters, counts, bpar, min_z, max_z, nside):
     )
 
     cdict = {
+        "w0": sims_parameters["w0"],
+        "wa": sims_parameters["wa"],
         'Omega_m': sims_parameters['Omega_m'],
         'sigma8': sims_parameters['sigma_8'],
         'h': sims_parameters['h'],
         'n_s': sims_parameters['n_s'],
         'w0': sims_parameters['w0'],
-        'wa': sims_parameters['wa'],
-        'Omega_b': sims_parameters['Omega_b'],"dark_energy_model" :  "ppf" 
+        'Omega_b': sims_parameters['Omega_b'],"dark_energy_model": "ppf" 
     }
 
     shell = bfn.utils.LightconeShell(map=counts, cosmo=cdict)
@@ -499,6 +498,71 @@ def F_nla(z, om0, A_ia, rho_c1, eta=0.0, z0=0.0, cosmo=None):
     return -A_ia * rho_c1 * om0 * ((1 + z) / (1 + z0))**eta / D
 
 
+def F_TT(z, om0, A2, rho_c1, eta=0.0, z0=0.0, cosmo=None):
+    z = np.asarray(z, dtype=float)
+    a = 1.0 / (1.0 + z)
+
+    if cosmo is None:
+        raise ValueError("Pass a pyccl.Cosmology as `cosmo`.")
+
+    D = ccl.growth_factor(cosmo, a)
+
+    return 5.0 * A2 * rho_c1 * om0 * ((1.0 + z) / (1.0 + z0))**eta / D**2
+
+
+
+
+def make_TT_from_delta(IA_array, delta_array, delta_chi=1.):
+    """
+    Build the tidal-torquing (TT) intrinsic ellipticity field from the
+    projected density contrast and the TA IA field.
+
+    Parameters
+    ----------
+    IA_array : list/array
+        Complex TA IA maps. For each shell, IA_array[i][0] = Q + iU.
+    delta_array : list/array
+        Projected density maps for each shell.
+    delta_chi : float
+        Shell thickness.
+
+    Returns
+    -------
+    TT_array : list
+        Complex TT ellipticity maps, TT = TT1 + i TT2.
+    """
+    TT_array = []
+
+    for IA_shell, delta_shell in zip(IA_array, delta_array):
+        delta = np.asarray(delta_shell, dtype=float)
+        delta = delta - np.mean(delta)
+
+        gamma_TA = IA_shell[0]
+        Q = gamma_TA.real
+        U = gamma_TA.imag
+
+        # Projected tidal tensor components
+        s11 = 0.5 * (delta + Q) - delta / 3.0
+        s22 = 0.5 * (delta - Q) - delta / 3.0
+        s12 = U
+
+        s11 /= delta_chi
+        s22 /= delta_chi
+        s12 /= delta_chi
+
+        # Tidal-torquing ellipticity
+        TT1 = s11**2 - s22**2
+        TT2 = -s12 * (s11 + s22)
+
+        TT1 -= np.mean(TT1)
+        TT2 -= np.mean(TT2)
+
+        TT_array.append(TT1 + 1j * TT2)
+    TT_array = np.array(TT_array)
+    TT_array = TT_array.reshape(TT_array.shape[0],1,TT_array.shape[-1])
+
+    return np.array(TT_array)
+    
 def IndexToDeclRa(index, nside, nest=False):
     """
     Convert HEALPix pixel index to (Dec, RA) in degrees.
@@ -519,6 +583,12 @@ def IndexToDeclRa(index, nside, nest=False):
     """
     theta, phi = hp.pixelfunc.pix2ang(nside, index, nest=nest)
     return -np.degrees(theta - np.pi/2.0), np.degrees(phi)
+
+
+def rotation_mirrors(rot):
+    """True if rotate_and_rebin(rot) includes the north-south mirror (rot 2, 3): spin-2 fields moved between
+    the simulation frame and the catalogue frame must then change the sign of their second component."""
+    return rot in (2, 3)
 
 
 def rotate_and_rebin(pix_, nside_maps, rot, delta_=0.0):
@@ -763,18 +833,6 @@ def build_shell_windows_and_partitions(
 
 #     return results
 
-def F_TT(z, om0, A2, rho_c1, eta=0.0, z0=0.0, cosmo=None):
-    z = np.asarray(z, dtype=float)
-    a = 1.0 / (1.0 + z)
-
-    if cosmo is None:
-        raise ValueError("Pass a pyccl.Cosmology as `cosmo`.")
-
-    D = ccl.growth_factor(cosmo, a)
-
-    return 5.0 * A2 * rho_c1 * om0 * ((1.0 + z) / (1.0 + z0))**eta / D**2
-
-
 def make_TT_from_delta(IA_array, delta_array, delta_chi=1.,clip = True):
     """
     Build the tidal-torquing (TT) intrinsic ellipticity field from the
@@ -838,6 +896,32 @@ def make_TT_from_delta(IA_array, delta_array, delta_chi=1.,clip = True):
 
     return np.array(TT_array)
 
+    
+def iter_lensing_fields(density, shells, camb_pars, nside_maps, *,
+                        do_shear=True, lmax=None, shear_planes=None):
+    """Stream the same GLASS lensing planes used by compute_lensing_fields.
+
+    ``shear_planes`` optionally selects transforms to evaluate when resuming a
+    disk-backed run. All density planes are still propagated in radial order.
+    Returned shear has GLASS/HEALPix convention; the survey convention uses
+    gamma1 = gamma.real and gamma2 = -gamma.imag.
+    """
+    if len(density) != len(shells):
+        raise ValueError('Density and window counts differ')
+    conv = glass.lensing.MultiPlaneConvergence(Cosmology.from_camb(camb_pars))
+    previous = -np.inf
+    for ss in range(len(density)):
+        if shells[ss].zeff <= previous:
+            raise ValueError('Lensing windows must be ordered near to far')
+        previous = shells[ss].zeff
+        conv.add_window(np.asarray(density[ss], dtype=np.float64), shells[ss])
+        kappa = np.array(conv.kappa, copy=True)
+        gamma = None
+        if do_shear and (shear_planes is None or ss in shear_planes):
+            gamma = glass.lensing.from_convergence(
+                kappa, lmax=lmax or nside_maps*3-1, shear=True)[0]
+        yield ss, kappa, gamma
+
 
 def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
                            do_kappa=True, do_shear=True, do_IA=False):
@@ -874,17 +958,17 @@ def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
             conv.add_window(density[ss], shells[ss])
             kappa = copy.deepcopy(conv.kappa)
 
+            if do_kappa:
+                if ss == 0:
+                    results["kappa"] = np.zeros((len(density),) + kappa.shape, dtype=kappa.dtype)
+                results["kappa"][ss] = kappa
+            
             if do_shear:
                 gamma = glass.lensing.from_convergence(kappa, lmax=nside_maps*3-1, shear=True)
                 if ss == 0:
-                    results["gamma"] = np.zeros((len(density),len(gamma),) + gamma[0].shape, dtype=np.complex64)#gamma[0].dtype)
+                    results["gamma"] = np.zeros((len(density),len(gamma),) + gamma[0].shape, dtype=gamma[0].dtype)
                 results["gamma"][ss] = gamma
-                
-            if do_kappa:
-                if ss == 0:
-                    results["kappa"] = np.zeros((len(density),) + kappa.shape, dtype=np.float32)#kappa.dtype)
-                results["kappa"][ss] = kappa
-            
+
     if do_IA:
         
         for ss in frogress.bar(range(len(density))):
@@ -896,9 +980,9 @@ def compute_lensing_fields(density, shells, camb_pars, nside_maps, *,
                 )
 
             if ss == 0:
-                results["IA_shear"] = np.zeros((len(density),len(IA),) + IA[0].shape, dtype=np.complex64)#IA[0].dtype)
+                results["IA_shear"] = np.zeros((len(density),len(IA),) + IA[0].shape, dtype=IA[0].dtype)
             results["IA_shear"][ss] = IA
-        
+
     return results
 
 
@@ -921,10 +1005,17 @@ def load_and_baryonify_gower_st_shells(
     shells,
     overwrite_baryonified_shells = False,
     dens_path = None,
-    tsz_path = None
+    tsz_path = None,
+    halo_catalog_path = None,
 ):
     """
     Load or create baryonified (or normal) GowerSt2 density shells.
+
+    Parameters
+    ----------
+    halo_catalog_path : str or path-like, optional
+        Halo catalogue used for baryonification. Defaults to
+        ``path_simulation/halo_catalog.parquet``.
 
     Returns
     -------
@@ -941,7 +1032,10 @@ def load_and_baryonify_gower_st_shells(
         bpar, sys = load_or_save_updated_params(path_simulation,baryons['base_params_path'],baryons['filename_new_params'],baryons['values_to_update'], overwrite = False)
         label_baryonification = "baryonified"
 
-        halo_catalog_path = os.path.join(path_simulation, "halo_catalog.parquet")
+        if halo_catalog_path is None:
+            halo_catalog_path = os.path.join(path_simulation, "halo_catalog.parquet")
+        else:
+            halo_catalog_path = os.fspath(halo_catalog_path)
         if tsz_path is None:
             tsz_path = os.path.join(path_simulation, f"tsz_{nside_maps}.npy")
         if dens_path is None:
@@ -957,6 +1051,9 @@ def load_and_baryonify_gower_st_shells(
                 max_redshift=baryons['max_z_halo_catalog'],
                 halo_snapshots_path=path_simulation,
                 catalog_path=halo_catalog_path,
+                log10_mass_limit=baryons.get('catalog_mass_cut'),
+                # halo shapes for the halo IA model (make_WL_sample with IA_model='halo')
+                include_ia_shapes=baryons.get('include_ia_shapes', True),
             )
 
         # --- Create baryonified density (and tSZ if needed)
@@ -1040,6 +1137,11 @@ def make_tsz_and_baryonified_density(
     tsz file:  path_simulation + f"/tsz_{nside_maps}.npy"
     dens file: path_simulation + f"/density_b_{nside_maps}_{noise_rel}.npy"
     """
+    # BaryonForge's two-halo term requires a linear-P(k) CCL cosmology (cosmology.read_sims_params now builds a
+    # CAMB/Mead2020 one): same parameters and configuration, matter_power_spectrum='linear'
+    if cosmo_pyccl._config_init_kwargs.get('matter_power_spectrum') != 'linear':
+        cosmo_pyccl = ccl.Cosmology(**{**cosmo_pyccl._params_init_kwargs, **cosmo_pyccl._config_init_kwargs,
+                                       'matter_power_spectrum': 'linear'})
   
     # ---------- tSZ ----------
     if do_tSZ:
@@ -1047,13 +1149,14 @@ def make_tsz_and_baryonified_density(
             print ('creating a tSZ map --')
             mask = (halos['M'] > 10**min_mass)
             cdict = {
+                "w0": sims_parameters["w0"],
+                "wa": sims_parameters["wa"],
                 "Omega_m": sims_parameters["Omega_m"],
                 "sigma8": sims_parameters["sigma_8"],
                 "h": sims_parameters["h"],
                 "n_s": sims_parameters["n_s"],
                 "w0": sims_parameters["w0"],
-                "wa": sims_parameters["wa"],
-                "Omega_b": sims_parameters["Omega_b"],"dark_energy_model" :  "ppf" 
+                "Omega_b": sims_parameters["Omega_b"],"dark_energy_model": "ppf" 
             }
     
             halos_ = bfn.utils.HaloLightConeCatalog(
@@ -1147,18 +1250,23 @@ def make_tsz_and_baryonified_density(
                     counts = copy.deepcopy(particles[i])
                     
 
-                mask_z = (halos["z"] > zmin) & (halos["z"] < zmax)
+                if "shell_index" in halos:
+                    mask_z = ((halos["shell_index"] == i) & (halos["z"] > zmin)
+                              & (halos["z"] < zmax))
+                else:
+                    mask_z = (halos["z"] > zmin) & (halos["z"] < zmax)
 
 
                 if len(halos["z"][mask_z])>1:
                     cdict = {
+                        "w0": sims_parameters["w0"],
+                        "wa": sims_parameters["wa"],
                         "Omega_m": sims_parameters["Omega_m"],
                         "sigma8": sims_parameters["sigma_8"],
                         "h": sims_parameters["h"],
                         "n_s": sims_parameters["n_s"],
                         "w0": sims_parameters["w0"],
-                        "wa": sims_parameters["wa"],
-                        "Omega_b": sims_parameters["Omega_b"],"dark_energy_model" :  "ppf" 
+                        "Omega_b": sims_parameters["Omega_b"],"dark_energy_model": "ppf" 
                     }
                     halos_ = bfn.utils.HaloLightConeCatalog(
                         halos["ra"][mask_z], halos["dec"][mask_z], halos["M"][mask_z], halos["z"][mask_z], cosmo=cdict
@@ -1183,7 +1291,10 @@ def make_tsz_and_baryonified_density(
                         density.append(density_b)
                         
                     
-            except:
+            except Exception as err:
+                # only shells without particle files are generated (lognormal); any other failure is an error
+                if not isinstance(err, FileNotFoundError):
+                    raise
                 print ('generate step ',step)
                 missing_shells.append(step)
                 
@@ -1327,3 +1438,148 @@ def cmb_lensing_from_glass_plus_gaussian(
     )
 
     return cmb_lensing_map, diagnostics, meta
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# CMB lensing convergence (production: NSIDE 2048, ell <= 4096, baryons from the existing NSIDE_lo fields)
+# ---------------------------------------------------------------------------------------------------------------
+
+def _read_counts(path_simulation, step):
+    """Particle counts of a lightcone step (Gower St parquet or Hypatia run.NNNNN.lightcone.npy)."""
+    path = os.path.join(path_simulation, f'particles_{int(step)}_4096.parquet')
+    if os.path.exists(path):
+        return np.array(pd.read_parquet(path)).flatten()*1.
+    return np.load(os.path.join(path_simulation, f'run.{int(step):05d}.lightcone.npy'))*1.
+
+
+def _kappa_native_shell(args):
+    """delta at nside (sum of the native sub-pixels) and, for baryon shells, the harmonic downgrade to nside_lo
+    used inside the baryonification (make_tsz_and_baryonified_density)."""
+    path_simulation, step, nside, nside_lo = args
+    counts = _read_counts(path_simulation, step)
+    c = hp.ud_grade(counts, nside, power=-2)
+    d = (c/c.mean() - 1).astype(np.float32)
+    d_lo = None
+    if nside_lo:
+        nside_native = hp.npix2nside(counts.size)
+        p = hp.sphtfunc.pixwin(nside_native)
+        alm = hp.almxfl(hp.map2alm(counts, lmax=2*nside_lo), 1/p[:2*nside_lo])
+        c_lo = hp.alm2map(alm, nside=nside_lo, pixwin=True)*(nside_native/nside_lo)**2
+        d_lo = c_lo/c_lo.mean() - 1
+    return d, d_lo
+
+
+def make_kappa_cmb(path_simulation, shells, steps, cosmo_bundle, delta_b=None, nside=2048, z_born=2.0,
+                   z_baryon=1.5, ell_edge=100, l_exact=0, seed=None, nproc=16):
+    """
+    Noiseless CMB lensing convergence (Born, source at z = 1100) at NSIDE `nside`, ell <= 2 nside:
+
+        kappa = sum_i q_i delta_i              native shells z < z_born, particle counts summed to `nside`
+              + Delta_b                        baryons: sum_i q_i (delta_b,i - delta_DMO,i) from the existing
+                                               NSIDE_lo baryonified fields (ell <= 2 NSIDE_lo), upgraded
+              + (T_edge - 1) kappa_b,shells    ell > 2 NSIDE_lo: the baryon power transfer
+                                               T = sqrt(C(b) / C(DMO)) of the baryon shells, averaged over the
+                                               last ell_edge multipoles below 2 NSIDE_lo, held constant above
+                                               (no step at 2 NSIDE_lo; no extrapolation of the trend, which the
+                                               NSIDE_lo baryonification does not resolve near its Nyquist
+                                               scale; FLAMINGO: C_kk +0.2% at ell 2100 to +2.3% at 4000 vs
+                                               the true hydro, against +1.9% to +4.1% without the term)
+              + coshirex.ladder_kappa          lognormal shells z_born -> 1100 (fast Limber mode by default);
+                                               independent of the baryon field.
+
+    delta_DMO,i is recomputed from the counts with the harmonic downgrade used inside the baryonification, so
+    the difference is exactly the baryon displacement.
+
+    Parameters
+    ----------
+    path_simulation : str
+        Folder with the particle counts (run.NNNNN.lightcone.npy or particles_N_4096.parquet).
+    shells : list of glass.shells.RadialWindow
+        Shell windows, low redshift first (build_shells).
+    steps : sequence of int
+        Simulation step of each shell (same order: shells_info['Step'][::-1]).
+    cosmo_bundle : dict
+        Must contain 'pars_camb'.
+    delta_b : dict {label: array (n_shells, 12 NSIDE_lo^2)} or None
+        Baryonified density fields (e.g. {0: np.load('delta_b_1024_0.npy', mmap_mode='r'), 1: ...}), same shell
+        order.  None: dark-matter only.
+    nside : int
+        Output NSIDE (ell_max = 2 nside).
+    z_born : float
+        Native shells with upper edge <= z_born; the lognormal ladder starts at the last one.
+    z_baryon : float
+        Shells with lower edge < z_baryon carry the baryon correction (max_z_halo_catalog); with several
+        delta_b fields, only the shells that differ between them (the others were not baryonified).
+    ell_edge : int
+        The baryon transfer above 2 NSIDE_lo is its mean over 2 NSIDE_lo - ell_edge <= ell < 2 NSIDE_lo.
+    l_exact : int
+        Passed to coshirex.ladder_kappa (0: fast; X: ell <= X conditioned on the simulated shells).
+    seed : int or None
+        Ladder seed.
+    nproc : int
+        Processes reading the native shells.
+
+    Returns
+    -------
+    kappa : dict {'dmo': map, label: map for each delta_b}   float32, RING, 12 nside^2
+    meta : dict   z_start of the ladder, shells used, baryon transfer per label
+    """
+    import multiprocessing
+    from .coshirex import born_weights, ladder_kappa
+
+    pars = cosmo_bundle['pars_camb']
+    base = [i for i in range(len(shells)) if np.max(shells[i].za) <= z_born + 1e-6]
+    q = born_weights([shells[i] for i in base], pars)
+    nside_lo = hp.npix2nside(next(iter(delta_b.values())).shape[1]) if delta_b else 0
+    bary = [i for i in base if delta_b and np.min(shells[i].za) < z_baryon]
+    if delta_b and len(delta_b) > 1:              # shells outside the baryonification are identical in all draws
+        fields = list(delta_b.values())
+        bary = [i for i in bary if not all(np.array_equal(fields[0][i], other[i]) for other in fields[1:])]
+
+    # conditioning shells for l_exact > 0: the last native shells within 400 Mpc/h
+    background = camb.get_background(pars)
+    chi = np.array([background.comoving_radial_distance(shells[i].zeff) for i in base])*pars.H0/100.
+    keep = [i for k, i in enumerate(base) if chi[-1] - chi[k] < 400.] if l_exact else []
+
+    npix, npix_lo = 12*nside**2, 12*nside_lo**2
+    kappa_dmo, kappa_bshells = np.zeros(npix), np.zeros(npix)
+    kappa_lo = np.zeros(npix_lo)
+    diff = {label: np.zeros(npix_lo) for label in (delta_b or {})}
+    last = {}
+    jobs = [(path_simulation, steps[i], nside, nside_lo if i in bary else 0) for i in base]
+    with multiprocessing.get_context('fork').Pool(nproc) as pool:
+        for i, w, (d, d_lo) in zip(base, q, pool.imap(_kappa_native_shell, jobs)):
+            kappa_dmo += w*d
+            if i in keep:
+                last[i] = d
+            if d_lo is not None:
+                kappa_bshells += w*d
+                kappa_lo += w*d_lo
+                for label, fields in delta_b.items():
+                    diff[label] += w*(np.asarray(fields[i], dtype=np.float64) - d_lo)
+
+    z_start = float(np.max(shells[base[-1]].za))
+    kappa_dmo += ladder_kappa(pars, z_start, nside, seed=seed, l_exact=l_exact,
+                              last_shells=[last[i] for i in keep] or None,
+                              last_windows=[shells[i] for i in keep] or None)
+    kappa = {'dmo': kappa_dmo.astype(np.float32)}
+    meta = dict(z_start=z_start, native_shells=base, baryon_shells=bary, transfer={})
+    if not bary:
+        return kappa, meta
+
+    lmax, lmax_lo = 2*nside, 2*nside_lo
+    ell = np.arange(lmax + 1)
+    alm_bshells = hp.map2alm(kappa_bshells, lmax=lmax, iter=0)
+    alm_lo = hp.map2alm(kappa_lo, lmax=lmax_lo)
+    upgrade = hp.pixwin(nside, lmax=lmax_lo)/hp.pixwin(nside_lo, lmax=lmax_lo)
+    index_lo = hp.Alm.getidx(lmax, *hp.Alm.getlm(lmax_lo))
+    for label in delta_b:
+        alm_diff = hp.map2alm(diff[label], lmax=lmax_lo)
+        transfer = np.sqrt(hp.alm2cl(alm_lo + alm_diff)/hp.alm2cl(alm_lo))
+        t_edge = float(transfer[lmax_lo - ell_edge:lmax_lo].mean())     # (ell = 2 NSIDE_lo is zeroed in the downgrade)
+        correction = hp.almxfl(alm_bshells, np.where(ell > lmax_lo, t_edge - 1., 0.))
+        correction[index_lo] += hp.almxfl(alm_diff, upgrade)
+        kappa[label] = (kappa_dmo + hp.alm2map(correction, nside, lmax=lmax)).astype(np.float32)
+        meta['transfer'][label] = dict(T_edge=t_edge, T_1000=float(transfer[900:1101].mean()),
+                                       T_1600=float(transfer[1500:1701].mean()))
+    return kappa, meta

@@ -1,0 +1,10 @@
+{
+  "_doc": "Source-clustering v2 priors (noise_model='poisson'): bias per bin b_t [1 + s_t (z - zbar_t)], drawn independently per bin and per sample. Adopted 2026-11-06 (user). The ranges stay inside the SC_v2 calibration grids (b 0.8-1.7, s 0-0.9).",
+  "bias_sc":       {"prior": "uniform", "range": [0.8, 1.7]},
+  "bias_sc_slope": {"prior": "uniform", "range": [0.3, 0.8]},
+  "noise_model": "poisson",
+  "calibrations": {"DESY6": "data/SC_v2_DES_nside1024_sim1.json",
+                   "NGC": "data/SC_v2_NGC_nside1024_sim1.json",
+                   "SGC": "data/SC_v2_SGC_nside1024_sim1.json",
+                   "BFD": "data/SC_v2_BFD_nside1024_sim1.json"}
+}

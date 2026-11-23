@@ -1,0 +1,174 @@
+{
+  "_doc": "IA priors for the DES/DECADE/BFD mocks. Rationale and evidence: Projects/des_decade_run/PRIORS.md. Adopted 2026-11-06. Amplitudes are in the package sign convention after the halo-IA sign fix: positive = physical (radial) alignment, same sign as NLA A > 0. Halo prior revised 2026-11-20 (NLA-spanning, low shot noise): see PRIORS.md.",
+  "halo": {
+    "parameters": {
+      "a_c": {
+        "prior": "uniform",
+        "range": [
+          -0.2,
+          0.5
+        ],
+        "fiducial": 0.17,
+        "doc": "central GI amplitude a_c = f_c * A_c (sets the GI signal at fixed structure); A_c = a_c / f_c is derived. a_c ~ 0.33 A0_NLA (z0=0.3), so [-0.2, 0.5] ~ A0 in [-0.5, 1.5]"
+      },
+      "eta_c": {
+        "prior": "uniform",
+        "range": [
+          -5.0,
+          0.0
+        ],
+        "fiducial": -3.0,
+        "doc": "(1+z)/1.67 scaling of A_c; [-5,0] covers eta_NLA ~ [-1, 1+]; eta_NLA ~ -2 (needs -6..-10) deliberately excluded"
+      },
+      "A_s": {
+        "prior": "uniform",
+        "range": [
+          -0.05,
+          0.05
+        ],
+        "fiducial": 0.01,
+        "doc": "satellite alignment amplitude, independent of A_c (user decision 2026-11-20)"
+      },
+      "eta_s": {
+        "prior": "uniform",
+        "range": [
+          -0.5,
+          0.5
+        ],
+        "fiducial": 0.0
+      },
+      "f_c": {
+        "prior": "uniform",
+        "range": [
+          0.7,
+          1.0
+        ],
+        "fiducial": 0.85,
+        "doc": "self (shot-noise) term at fixed GI scales as 1/f_c; NLA coverage independent of f_c"
+      },
+      "f_sat": {
+        "prior": "uniform",
+        "range": [
+          0.3,
+          0.8
+        ],
+        "fiducial": 0.6
+      }
+    },
+    "fixed": {
+      "sigma_logM": 0.2,
+      "alpha": 1.0,
+      "b_c": 0.0,
+      "b_s": 0.0,
+      "redshift_pivot": "(1+z)/1.67",
+      "halo_catalog_log10mass_cut_Msun": 12.0,
+      "virtual_halos": true
+    },
+    "noise_budget_rejection": {
+      "rule": "after building the halo-IA numerator, reject the (A_c, eta_c, A_s, eta_s) draw and redraw them on the same halo population if, in any tomographic bin, more than max_fraction of the footprint pixels have var_IA / var_noise > 1 (var_IA = 0.5 <numerator_sq> on NSIDE-64 superpixels, as in lensing.make_WL_sample)",
+      "max_fraction": 1.0,
+      "status": "disabled 2026-11-18 (max_fraction = 1): superseded by the local IA cap; set max_fraction back to 0.02 to restore the rejection. The capped-pixel fraction per bin is still stored in each mock (ia_noise_fraction).",
+      "max_fraction_before_cap": 0.02
+    },
+    "tng300_best_fits": {
+      "outlier_objective_final": {
+        "f_c": 0.5,
+        "f_sat": 0.8,
+        "A_c": 2.566,
+        "eta_c": -1.0,
+        "A_s": 0.0193,
+        "eta_s": 0.0
+      },
+      "chi2_des_footprint": {
+        "f_c": 0.7,
+        "f_sat": 0.6,
+        "A_c": 1.71,
+        "eta_c": -1.0,
+        "A_s": 0.025,
+        "eta_s": 0.0
+      }
+    },
+    "ia_cap": {
+      "alpha": 1.0,
+      "ia_self_nside": null,
+      "rule": "local IA cap (lensing.make_WL_sample / bfd_utils.make_BFD_sample ia_cap_alpha): in every pixel the halo-IA term is multiplied by s = min(1, sqrt(alpha var_noise / var_IA)) with var_IA the realised per-pixel self term; residual noise variance var_noise - s^2 var_IA",
+      "adopted": "2026-11-18; validation: Projects/ia_sc_validation/RESULTS.md (survey-target populations on the real DES Y6 / DECADE NGC / SGC catalogues: noise moments and couplings <= 0.4 sigma; the cap removes up to ~1.5 sigma of observed bin-1 signal only at eta ~ -2, |A_NLA| ~ 1, low f_c)"
+    },
+    "derived": {
+      "A_c": "a_c / f_c"
+    },
+    "previous_prior_20261106": {
+      "A_c": {
+        "prior": "uniform",
+        "range": [
+          -2.0,
+          2.5
+        ],
+        "fiducial": 1.71
+      },
+      "eta_c": {
+        "prior": "uniform",
+        "range": [
+          -2.0,
+          0.0
+        ],
+        "fiducial": -1.0
+      },
+      "A_s": {
+        "prior": "uniform",
+        "range": [
+          0.0,
+          0.03
+        ],
+        "fiducial": 0.025
+      },
+      "eta_s": {
+        "prior": "uniform",
+        "range": [
+          -0.5,
+          0.5
+        ],
+        "fiducial": 0.0
+      },
+      "f_c": {
+        "prior": "uniform",
+        "range": [
+          0.2,
+          0.7
+        ],
+        "fiducial": 0.7
+      },
+      "f_sat": {
+        "prior": "uniform",
+        "range": [
+          0.3,
+          0.8
+        ],
+        "fiducial": 0.6
+      }
+    }
+  },
+  "nla_comparison": {
+    "parameters": {
+      "A_IA": {
+        "prior": "uniform",
+        "range": [
+          -2.0,
+          2.0
+        ]
+      },
+      "eta_IA": {
+        "prior": "uniform",
+        "range": [
+          -2.0,
+          2.0
+        ]
+      }
+    },
+    "fixed": {
+      "redshift_pivot": "(1+z)/1.67",
+      "IA_model": "NLA"
+    }
+  },
+  "sharing": "one IA draw per (simulation, baryon realisation, rotation), shared by all samples (DES Y6, BFD, DECADE NGC, SGC) -- current convention, to be confirmed"
+}

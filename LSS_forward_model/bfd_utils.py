@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import healpy as hp
 import pyccl as ccl
-from .maps import F_nla, F_TT, convert_to_pix_coord, rotate_and_rebin
+from .maps import F_nla, F_TT, convert_to_pix_coord, rotate_and_rebin, rotation_mirrors
 from .source_clustering import (evaluate_SC_correction, expected_counts_map, fracdet_map, noise_modulation,
                                 shell_bias)
 
@@ -527,6 +527,160 @@ def make_bfd_map(
     return se1_map, se2_map, mask_map, n_source
 
 
+def make_bfd_map_count(cat, Rbar_code, nside=1024, random_rotate=False, rotate_selection=None, nmin=3, rng=None):
+    """
+    Count-normalised BFD map (adopted 2026-11-20; validation:
+    /global/cfs/cdirs/m5099/des_decade_run_outputs/bfd_cnt_validation/REPORT.md):
+
+        g_p = (1/N_p) Rbar_lib^{-1} Q_p = -(1/N_p) Rbar_code^{-1} Q_p,   on the fixed mask N_p >= nmin,
+
+    with Q_p the per-pixel sum of q over ALL rows (galaxies and selection pseudo-rows, rows prepared exactly as in
+    make_bfd_map), N_p the number of galaxies (selection_term == 0) and Rbar_code the GLOBAL response of the full
+    unrotated catalogue in the make_bfd_map (negative) convention, sum R / N_total (BFD_light_N3_meta.json,
+    'Rbar_code_sign'; never recompute it from a cut catalogue).  Library sign: correlates positively with mdet.
+    No |g| cut, no weights; the mask depends on N only (identical for the data and every rotation).
+
+    Returns e1, e2, n_gal (npix float), mask (bool), V (npix) = 0.5 sum_rows |q|^2 (rotation invariant), so the
+    exact per-pixel, per-component noise variance of the rotated map is V_p cR / N_p^2, cR = ||Rbar^-1||_F^2 / 2.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    if rotate_selection is None:
+        rotate_selection = random_rotate
+    npix = hp.nside2npix(nside)
+    selterm = np.asarray(cat["selection_term"])
+    is_real_all = selterm == 0
+    is_sel_all = ~is_real_all
+    q_all = np.zeros((len(selterm), 2), dtype=float)
+    finite = np.ones(len(selterm), dtype=bool)
+
+    if np.any(is_real_all):                          # same row processing as make_bfd_map
+        pqr_real = np.asarray(cat["pqr10_prelog"][is_real_all]).copy()
+        if random_rotate:
+            pqr_real = rotatePqr(rng.uniform(0.0, 2.0 * np.pi, pqr_real.shape[0]), pqr_real)
+        pqr_real = stripMuPqr(logPqr(pqr_real))
+        q_all[is_real_all] = pqr_real[:, 1:3]
+        finite[is_real_all] = np.all(np.isfinite(pqr_real), axis=1)
+        del pqr_real
+    if np.any(is_sel_all):
+        pqr_sel = np.asarray(cat["pqr"][is_sel_all]).copy()
+        pqr_sel[:, 0] = np.exp(pqr_sel[:, 0])
+        p_sel, q_sel, r_sel = splitPqr(pqr_sel)
+        r_sel = r_sel + q_sel[..., :, np.newaxis] * q_sel[..., np.newaxis, :]
+        q_sel = q_sel * p_sel[..., np.newaxis]
+        r_sel = r_sel * p_sel[..., np.newaxis, np.newaxis]
+        pqr_sel = packPqr(p_sel, q_sel, r_sel, axis=-1)
+        if rotate_selection:
+            pqr_sel = rotatePqr(rng.uniform(0.0, 2.0 * np.pi, pqr_sel.shape[0]), pqr_sel)
+        pqr_sel = logPqr(pqr_sel)
+        q_all[is_sel_all] = pqr_sel[:, 1:3]
+        finite[is_sel_all] = np.all(np.isfinite(pqr_sel), axis=1)
+        del pqr_sel, p_sel, q_sel, r_sel
+
+    pix = convert_to_pix_coord(np.asarray(cat["ra"])[finite], np.asarray(cat["dec"])[finite], nside=nside)
+    q_all = q_all[finite]
+    n_gal = np.bincount(pix, weights=is_real_all[finite].astype(float), minlength=npix)
+    Q1 = np.bincount(pix, weights=q_all[:, 0], minlength=npix)
+    Q2 = np.bincount(pix, weights=q_all[:, 1], minlength=npix)
+    V = 0.5 * np.bincount(pix, weights=q_all[:, 0]**2 + q_all[:, 1]**2, minlength=npix)
+    del q_all, pix
+
+    mask = n_gal >= max(nmin, 1)
+    Rinv_lib = np.linalg.inv(-np.asarray(Rbar_code, dtype=float))
+    e1 = np.zeros(npix, dtype=float)
+    e2 = np.zeros(npix, dtype=float)
+    e1[mask] = (Rinv_lib[0, 0] * Q1[mask] + Rinv_lib[0, 1] * Q2[mask]) / n_gal[mask]
+    e2[mask] = (Rinv_lib[1, 0] * Q1[mask] + Rinv_lib[1, 1] * Q2[mask]) / n_gal[mask]
+    return e1, e2, n_gal, mask, V
+
+
+def _count_estimator_bin(cat, Rbar_code, g1_map, g2_map, d_map, h1_map, h2_map, numerator_sq, lam_map, dm,
+                         include_SC, noise_model, ia_on, ia_cap_alpha, ia_self_nside, nside, nmin,
+                         random_rotate, rotate_selection, rng, do_noise, do_data, decompose_shear):
+    """One tomographic bin of make_BFD_sample(estimator='count') (REPORT.md sections 3.2 and 6):
+
+        e_mock = dm (gamma + s_cap gamma_IA) + sqrt(s2_p) alpha_p n_p,
+
+    unit (global) shear response; n_p = count-normalised map of the randomly rotated rows; exact data noise
+    variance v_p = V_p cR / N_p^2; SC: s2_p = [h(lam D)/h(lam)]_p / cv, cv = sum_M s2 v / sum_M v (total noise
+    variance conserved on the mask); halo IA: local cap s_cap = min(1, sqrt(alpha s2 v / var_IA)) on the realised
+    per-pixel self term var_IA = 0.5 numerator_sq, alpha_p^2 = 1 - s_cap^2 var_IA / (s2 v)."""
+    npix = hp.nside2npix(nside)
+    Rinv_lib = np.linalg.inv(-np.asarray(Rbar_code, dtype=float))
+    cR = 0.5 * np.sum(Rinv_lib**2)
+
+    rng_sim = np.random.default_rng(rng.integers(0, 2**32 - 1))
+    e1_rot, e2_rot, n_gal, mask, V = make_bfd_map_count(cat, Rbar_code, nside=nside, random_rotate=random_rotate,
+                                                        rotate_selection=rotate_selection, nmin=nmin, rng=rng_sim)
+    v = np.zeros(npix, dtype=float)
+    v[mask] = V[mask] * cR / n_gal[mask]**2
+    del V
+
+    s2 = np.zeros(npix, dtype=float)
+    s2[mask] = 1.0
+    cv = 1.0
+    if include_SC:
+        if noise_model != "poisson":
+            raise ValueError("estimator='count' supports noise_model='poisson' only")
+        good = mask & np.isfinite(d_map) & (d_map > 0.0) & (lam_map > 0.0)
+        s2[:] = 0.0
+        s2[good] = noise_modulation(d_map[good], lam_map[good], "poisson")
+        cv = float(np.sum((s2 * v)[mask]) / np.sum(v[mask]))
+        s2 /= cv
+    var_noise = s2 * v
+
+    alpha = np.zeros(npix, dtype=float)
+    alpha[mask] = 1.0
+    cap_out = {}
+    if h1_map is not None:
+        cap = np.ones(npix, dtype=float)
+        if ia_on:
+            var_IA = 0.5 * np.asarray(numerator_sq, dtype=float)
+            if ia_self_nside is not None:
+                expected = hp.ud_grade(hp.ud_grade(var_IA, ia_self_nside), nside)
+                if np.sum(expected[mask]) > 0:
+                    var_IA = expected * np.sum(var_IA[mask]) / np.sum(expected[mask])
+            ratio = np.zeros(npix, dtype=float)
+            use = mask & (var_noise > 0)
+            if ia_cap_alpha is not None:
+                capped = mask & (var_IA > 0) & (var_IA > ia_cap_alpha * var_noise)
+                cap[capped] = np.sqrt(ia_cap_alpha * var_noise[capped] / var_IA[capped])
+                ratio[use] = cap[use]**2 * var_IA[use] / var_noise[use]
+                ratio[use & capped] = ia_cap_alpha
+            else:
+                ratio[use] = var_IA[use] / var_noise[use]
+                if np.mean(ratio[use] > 1) > 0.001:
+                    print(f"BFD (count): IA variance > noise variance in {100*np.mean(ratio[use] > 1):.2f}% "
+                          f"of the pixels (noise set to 0 there)", flush=True)
+            alpha[use] = np.sqrt(np.clip(1.0 - ratio[use], 0.0, 1.0))
+            alpha[mask & ~use] = 0.0
+            cap_out = dict(ia_cap_factor=cap, ia_var_noise=var_noise.copy(), ia_var_IA=var_IA)
+        g1_map = g1_map + cap * h1_map
+        g2_map = g2_map + cap * h2_map
+
+    scale = np.sqrt(s2) * alpha
+    gamma1_map = np.where(mask, dm * g1_map, 0.0)
+    gamma2_map = np.where(mask, dm * g2_map, 0.0)
+    out = {"g1_map": g1_map, "g2_map": g2_map, "gamma1_map": gamma1_map, "gamma2_map": gamma2_map,
+           "d_map": d_map, "q_noise_scale_map": scale, "ia_noise_factor": alpha, **cap_out,
+           "var_noise_data": v, "sc_cv": cv,
+           "e1": scale * e1_rot + gamma1_map, "e2": scale * e2_rot + gamma2_map,
+           "mask": mask, "n_source": n_gal}
+    if decompose_shear:
+        out.update(e1_base=scale * e1_rot, e2_base=scale * e2_rot, mask_base=mask,
+                   e1_signal=gamma1_map, e2_signal=gamma2_map)
+    del e1_rot, e2_rot
+    if do_noise:
+        rng_noise = np.random.default_rng(rng.integers(0, 2**32 - 1))
+        e1n, e2n, _, _, _ = make_bfd_map_count(cat, Rbar_code, nside=nside, random_rotate=True,
+                                               rotate_selection=rotate_selection, nmin=nmin, rng=rng_noise)
+        out.update(e1n=scale * e1n, e2n=scale * e2n, mask_noise=mask)
+    if do_data:
+        e1d, e2d, _, _, _ = make_bfd_map_count(cat, Rbar_code, nside=nside, random_rotate=False,
+                                               rotate_selection=False, nmin=nmin)
+        out.update(e1_data=e1d, e2_data=e2d, mask_data=mask)
+    return out
+
 
 def bfd_expected_counts(cats_BFD, nside_maps, nside_sub=4096):
     """
@@ -585,9 +739,23 @@ def make_BFD_sample(
     subtract_IA_noise=True,
     ia_noise_nside=64,
     lam_maps=None,
+    ia_cap_alpha=1.0,
+    ia_self_nside=None,
+    estimator="ml",
+    Rbar=None,
+    nmin=3,
+    ia_over_D=True,
+    nla_over_D=False,
 ):
     """
     BFD analogue of make_WL_sample.
+
+    estimator: 'ml' (default, previous per-pixel R_p^-1 Q_p map, |g| < 1 cut; unchanged) or 'count' (adopted for
+        the DES/DECADE run 2026-11-20): g_p = -(1/N_p) Rbar^-1 Q_p with the GLOBAL full-catalogue response Rbar
+        (Rbar: per-bin 2x2 in the make_bfd_map code sign, BFD_light_N3_meta.json 'Rbar_code_sign'), fixed mask
+        N_p >= nmin, unit shear response (map-level injection dm gamma), exact noise variance and analytic SC
+        normalisation (see make_bfd_map_count, _count_estimator_bin).  SC_corrections are not used (they were
+        calibrated on the 'ml' estimator); lam_maps should be the full-catalogue expected counts.
 
     Source clustering and intrinsic alignments follow lensing.make_WL_sample:
 
@@ -601,8 +769,26 @@ def make_BFD_sample(
         SC_corrections (dict of callables of b); unchanged.
     IA_model: 'deltaNLA' (default, NLA x (1 + bias_TA delta)), 'NLA', or 'halo' (halo_IA from
         halo_ia.make_halo_IA_numerator, added to the shear after the source-clustering normalisation; with
-        subtract_IA_noise its white variance, expected on NSIDE ia_noise_nside superpixels, is removed from the
-        q noise as in make_WL_sample).
+        subtract_IA_noise its white variance is removed from the q noise as in make_WL_sample).
+    ia_noise_nside: NSIDE of the superpixels on which the per-object q-noise variance of the budget is averaged.
+    ia_self_nside: NSIDE of the superpixels on which the halo IA self term is averaged; None (default since
+        2026-11-18) = realised self term of each pixel, as make_WL_sample.  Pass ia_self_nside=ia_noise_nside
+        (and ia_cap_alpha=None) for the previous prescription.
+    ia_over_D: halo IA (IA_model='halo'): divide the IA numerator by the source-clustering density D (floored at
+        1e-3) and its self term by D^2 per simulation pixel, before the projection to the catalogue frame, as
+        lensing.make_WL_sample(ia_over_D=True) (default since 2026-11-23: local mean alignment).  False = the
+        previous term (bit-identical).
+    nla_over_D: IA_model='NLA' with noise_model='poisson' only.  False (default since 2026-11-23): pure NLA, the IA
+        term sum_i n_i IA_i (+ TT) is added after the source-clustering division by D (no density weighting; SC still
+        acts on the gravitational shear and the noise), as lensing.make_WL_sample.  True = previous sum n IA / D
+        (bit-identical).  'deltaNLA' and noise_model='inverse_density' are unchanged.
+    ia_cap_alpha: local cap of the halo IA term on this function's noise budget, default 1.0 since 2026-11-18
+        (None = no cap; ignored unless IA_model='halo' and subtract_IA_noise), as lensing.make_WL_sample: the
+        projected IA field of every budget pixel (n_ref > 0, var_bfd > 0)
+        is multiplied by s = min(1, sqrt(alpha var_noise / var_IA)) (both components, gravitational shear
+        unchanged), and the q-noise subtraction uses s^2 var_IA <= alpha var_noise.  s = 1 where var_IA = 0 and
+        outside the budget pixels; s = 0 where var_IA > 0 and var_noise = 0.  Outputs ia_cap_factor,
+        ia_var_noise, ia_var_IA (non-minimal output).
 
     Important sign convention:
 
@@ -648,10 +834,23 @@ def make_BFD_sample(
 
     if noise_model not in ("poisson", "inverse_density"):
         raise ValueError("noise_model must be 'poisson' or 'inverse_density'")
+    if estimator not in ("ml", "count"):
+        raise ValueError("estimator must be 'ml' or 'count'")
+    if estimator == "count":
+        if Rbar is None:
+            raise ValueError("estimator='count' needs Rbar (global full-catalogue response per bin, code sign)")
+        if compact_savings or minimal_output:
+            raise ValueError("estimator='count' returns full maps (compact_savings/minimal_output not supported)")
+        SC_corrections = None
     if IA_model not in ("NLA", "deltaNLA", "halo"):
         raise ValueError("IA_model must be 'NLA', 'deltaNLA' or 'halo'")
     if IA_model == "halo" and halo_IA is None:
         raise ValueError("IA_model='halo' needs halo_IA (halo_ia.make_halo_IA_numerator)")
+    if IA_model != "halo" or not subtract_IA_noise:
+        ia_cap_alpha = None                     # no halo-IA noise budget: the cap does not apply
+    if ia_cap_alpha is not None:
+        if not 0 < ia_cap_alpha <= 1:
+            raise ValueError("ia_cap_alpha must be in (0, 1]")
     bias_sc_slope = np.asarray(sims_parameters.get("bias_sc_slope", np.zeros(n_tomo)), dtype=float)
     bias_shell = shell_bias(ngal_glass, zeff_glass, bias_sc, bias_sc_slope)
 
@@ -671,63 +870,86 @@ def make_BFD_sample(
         coeff_kurtosis_array = np.zeros(n_tomo)
         A_corr_array = np.ones(n_tomo)
 
-    g1_tot = np.zeros((n_tomo, npix), dtype=float)
-    g2_tot = np.zeros((n_tomo, npix), dtype=float)
-    d_tot = np.zeros((n_tomo, npix), dtype=float)
+    # simulation pixels read by the catalogue (rotated footprint): the shell sums are only evaluated there
+    # (identical values; zero elsewhere, where no object reads them)
+    pix_sim_tomo = [rotate_and_rebin(convert_to_pix_coord(cats_BFD[tomo]["ra"], cats_BFD[tomo]["dec"], nside=nside_maps * 2),
+                                     nside_maps, sims_parameters["rot"], delta_=sims_parameters["delta_rot"])
+                    for tomo in range(n_tomo)]
+    needed = np.flatnonzero(np.bincount(np.concatenate(pix_sim_tomo), minlength=npix))
 
-    for tomo in range(n_tomo):
-        for i in range(len(fields["gamma"])):
+    C1 = 5e-14
+    rho_crit0_h2 = ccl.physical_constants.RHO_CRITICAL
+    rho_c1 = C1 * rho_crit0_h2
+    g1_n = np.zeros((n_tomo, len(needed)), dtype=float)
+    g2_n = np.zeros((n_tomo, len(needed)), dtype=float)
+    d_n = np.zeros((n_tomo, len(needed)), dtype=float)
+    # pure NLA: IA kept out of the source-clustering ratio
+    nla_pure = IA_model == "NLA" and not nla_over_D and noise_model == "poisson"
+    if nla_pure:
+        ia1_n = np.zeros((n_tomo, len(needed)), dtype=float)
+        ia2_n = np.zeros((n_tomo, len(needed)), dtype=float)
 
-            C1 = 5e-14
-            rho_crit0_h2 = ccl.physical_constants.RHO_CRITICAL
-            rho_c1 = C1 * rho_crit0_h2
+    for i in range(len(fields["gamma"])):
+        if not np.any(ngal_glass[:, i]):
+            continue
+        density_i = fields["density"][i][needed]
+        gamma_i = fields["gamma"][i][0][needed]
+        use_NLA = "IA_shear" in fields and IA_model != "halo"
+        use_TT = "IA_shear_TT" in fields and IA_model != "halo"
+        if use_NLA or use_TT:
+            IA_f = F_nla(z=zeff_glass[i], om0=sims_parameters["Omega_m"], A_ia=sims_parameters["A_IA"],
+                         rho_c1=rho_c1, eta=sims_parameters["eta_IA"], z0=0.67, cosmo=cosmo_bundle["cosmo_pyccl"])
+            IA_f2 = F_TT(z=zeff_glass[i], om0=sims_parameters["Omega_m"], A2=sims_parameters["A_IA2"],
+                         rho_c1=rho_c1, eta=sims_parameters["eta_IA"], z0=0.67, cosmo=cosmo_bundle["cosmo_pyccl"])
+        IA_i = fields["IA_shear"][i][0][needed] if use_NLA else None
+        IA_TT_i = fields["IA_shear_TT"][i][0][needed] if use_TT else None
 
-            IA_f = F_nla(
-                z=zeff_glass[i],
-                om0=sims_parameters["Omega_m"],
-                A_ia=sims_parameters["A_IA"],
-                rho_c1=rho_c1,
-                eta=sims_parameters["eta_IA"],
-                z0=0.67,
-                cosmo=cosmo_bundle["cosmo_pyccl"],
-            )
-
-            IA_f2 = F_TT(
-                z=zeff_glass[i],
-                om0=sims_parameters["Omega_m"],
-                A2=sims_parameters["A_IA2"],
-                rho_c1=rho_c1,
-                eta=sims_parameters["eta_IA"],
-                z0=0.67,
-                cosmo=cosmo_bundle["cosmo_pyccl"],
-            )
-
+        for tomo in range(n_tomo):
+            if ngal_glass[tomo, i] == 0:
+                continue
             if noise_model == "inverse_density":
-                w_sc = 1.0 + bias_sc[tomo] * fields["density"][i]
+                w_sc = 1.0 + bias_sc[tomo] * density_i
             else:
-                w_sc = 1.0 + bias_shell[tomo, i] * fields["density"][i]
-            w_ta = 1.0 + bias_TA[tomo] * fields["density"][i] if IA_model == "deltaNLA" else 1.0
+                w_sc = 1.0 + bias_shell[tomo, i] * density_i
+            w_ta = 1.0 + bias_TA[tomo] * density_i if IA_model == "deltaNLA" else 1.0
 
-            g1_G = -1. * fields["gamma"][i][0].real
-            g2_G = -1. *  fields["gamma"][i][0].imag
+            g1_G = -1. * gamma_i.real
+            g2_G = -1. * gamma_i.imag
 
-            if "IA_shear" in fields and IA_model != "halo":
-                g1_NLA = -1. *  fields["IA_shear"][i][0].real * IA_f
-                g2_NLA = -1. *  fields["IA_shear"][i][0].imag * IA_f
+            if use_NLA:
+                g1_NLA = -1. * IA_i.real * IA_f
+                g2_NLA = -1. * IA_i.imag * IA_f
             else:
                 g1_NLA = 0.0
                 g2_NLA = 0.0
 
-            if "IA_shear_TT" in fields and IA_model != "halo":
-                g1_TT = -1. *  fields["IA_shear_TT"][i][0].real * IA_f2
-                g2_TT = -1. *  fields["IA_shear_TT"][i][0].imag * IA_f2
+            if use_TT:
+                g1_TT = -1. * IA_TT_i.real * IA_f2
+                g2_TT = -1. * IA_TT_i.imag * IA_f2
             else:
                 g1_TT = 0.0
                 g2_TT = 0.0
 
-            g1_tot[tomo] += ngal_glass[tomo, i] * (w_sc * g1_G + w_ta * (g1_NLA + g1_TT))
-            g2_tot[tomo] += ngal_glass[tomo, i] * (w_sc * g2_G + w_ta * (g2_NLA + g2_TT))
-            d_tot[tomo] += ngal_glass[tomo, i] * w_sc
+            if nla_pure:
+                g1_n[tomo] += ngal_glass[tomo, i] * w_sc * g1_G
+                g2_n[tomo] += ngal_glass[tomo, i] * w_sc * g2_G
+                ia1_n[tomo] += ngal_glass[tomo, i] * (g1_NLA + g1_TT)
+                ia2_n[tomo] += ngal_glass[tomo, i] * (g2_NLA + g2_TT)
+            else:
+                g1_n[tomo] += ngal_glass[tomo, i] * (w_sc * g1_G + w_ta * (g1_NLA + g1_TT))
+                g2_n[tomo] += ngal_glass[tomo, i] * (w_sc * g2_G + w_ta * (g2_NLA + g2_TT))
+            d_n[tomo] += ngal_glass[tomo, i] * w_sc
+
+    g1_tot = np.zeros((n_tomo, npix), dtype=float)
+    g2_tot = np.zeros((n_tomo, npix), dtype=float)
+    d_tot = np.zeros((n_tomo, npix), dtype=float)
+    g1_tot[:, needed], g2_tot[:, needed], d_tot[:, needed] = g1_n, g2_n, d_n
+    if nla_pure:
+        ia1_tot = np.zeros((n_tomo, npix), dtype=float)
+        ia2_tot = np.zeros((n_tomo, npix), dtype=float)
+        ia1_tot[:, needed], ia2_tot[:, needed] = ia1_n, ia2_n
+        del ia1_n, ia2_n
+    del g1_n, g2_n, d_n
 
     def project_map_to_bfd_footprint(cat, map_in, pix_cat=None, pix_sim=None):
         if pix_cat is None or pix_sim is None:
@@ -755,6 +977,7 @@ def make_BFD_sample(
 
     maps_sim = dict()
     cats_sim = None
+    mirror_sign = -1.0 if rotation_mirrors(sims_parameters["rot"]) else 1.0
 
     for tomo in range(n_tomo):
         print(f"Building BFD tomo {tomo}", flush=True)
@@ -764,6 +987,10 @@ def make_BFD_sample(
         g1_map, n_obj_map, pix_cat, pix_sim = project_map_to_bfd_footprint(cat_this, g1_tot[tomo])
         g2_map, _, _, _ = project_map_to_bfd_footprint(cat_this, g2_tot[tomo], pix_cat=pix_cat, pix_sim=pix_sim)
         d_map, _, _, _ = project_map_to_bfd_footprint(cat_this, d_tot[tomo], pix_cat=pix_cat, pix_sim=pix_sim)
+        # rotations 2, 3 of rotate_and_rebin include a north-south mirror (theta -> pi - theta): e_theta flips, so
+        # the second shear component changes sign between the simulation frame and the catalogue frame in which
+        # the BFD maps are built (without it E -> (E - iB) e^{-4 i phi_l}: half of the E power goes to B)
+        g2_map *= mirror_sign
 
         good_d = np.isfinite(d_map) & (d_map > 0.0)
 
@@ -773,17 +1000,47 @@ def make_BFD_sample(
             g2_map[good_d] /= d_map[good_d]
             g1_map[~good_d] = 0.0
             g2_map[~good_d] = 0.0
+            if nla_pure:                         # pure NLA: object mean, no source-clustering weight
+                ia1_map, _, _, _ = project_map_to_bfd_footprint(cat_this, ia1_tot[tomo], pix_cat=pix_cat, pix_sim=pix_sim)
+                ia2_map, _, _, _ = project_map_to_bfd_footprint(cat_this, ia2_tot[tomo], pix_cat=pix_cat, pix_sim=pix_sim)
+                g1_map[good_d] += ia1_map[good_d]
+                g2_map[good_d] += mirror_sign * ia2_map[good_d]
+                del ia1_map, ia2_map
 
         # halo IA: separate term after the source-clustering normalisation (the model sources carry their
-        # own clustering), as in make_WL_sample
+        # own clustering), divided by D (ia_over_D), as in make_WL_sample
         if IA_model == "halo":
-            h1_map, _, _, _ = project_map_to_bfd_footprint(cat_this, halo_IA["numerator"][tomo].real,
+            # I/D per simulation pixel (D only evaluated on the catalogue pixels, needed), or I (previous)
+            if ia_over_D:
+                ia_inv_D = np.zeros(npix, dtype=float)
+                ia_inv_D[needed] = 1.0 / np.maximum(d_tot[tomo][needed], 1e-3)
+            else:
+                ia_inv_D = np.ones(npix, dtype=float)
+            h1_map, _, _, _ = project_map_to_bfd_footprint(cat_this, halo_IA["numerator"][tomo].real * ia_inv_D,
                                                            pix_cat=pix_cat, pix_sim=pix_sim)
-            h2_map, _, _, _ = project_map_to_bfd_footprint(cat_this, halo_IA["numerator"][tomo].imag,
+            h2_map, _, _, _ = project_map_to_bfd_footprint(cat_this, halo_IA["numerator"][tomo].imag * ia_inv_D,
                                                            pix_cat=pix_cat, pix_sim=pix_sim)
-            g1_map = g1_map + h1_map
-            g2_map = g2_map + h2_map
-            del h1_map, h2_map
+            h2_map *= mirror_sign
+        if estimator == "count":
+            ia_on = IA_model == "halo" and subtract_IA_noise
+            nsq = None
+            if ia_on:
+                nsq, _, _, _ = project_map_to_bfd_footprint(cat_this, halo_IA["numerator_sq"][tomo] * ia_inv_D**2,
+                                                            pix_cat=pix_cat, pix_sim=pix_sim)
+            lam_t = lam_maps[tomo] if (include_SC and noise_model == "poisson") else None
+            maps_this = _count_estimator_bin(
+                cat_this, Rbar[tomo], g1_map, g2_map, d_map,
+                h1_map if IA_model == "halo" else None, h2_map if IA_model == "halo" else None, nsq, lam_t,
+                dm[tomo], include_SC, noise_model, ia_on, ia_cap_alpha, ia_self_nside, nside_maps, nmin,
+                random_rotate, rotate_selection, rng, do_noise, do_data, decompose_shear)
+            maps_this.update(n_obj_map=n_obj_map, pix_cat=pix_cat, pix_sim=pix_sim)
+            maps_sim[tomo] = maps_this
+            continue
+        if IA_model == "halo":
+            if ia_cap_alpha is None:
+                g1_map = g1_map + h1_map
+                g2_map = g2_map + h2_map
+                del h1_map, h2_map
 
         gamma1_map = dm[tomo] * g1_map
         gamma2_map = dm[tomo] * g2_map
@@ -849,15 +1106,30 @@ def make_BFD_sample(
             var_noise = np.zeros(npix, dtype=float)
             var_noise[good] = q_noise_scale_map[good]**2 * sigma_obj2[good] / n_ref[good]
 
-            numerator_sq, _, _, _ = project_map_to_bfd_footprint(cat_this, halo_IA["numerator_sq"][tomo],
+            numerator_sq, _, _, _ = project_map_to_bfd_footprint(cat_this, halo_IA["numerator_sq"][tomo] * ia_inv_D**2,
                                                                  pix_cat=pix_cat, pix_sim=pix_sim)
-            if ia_noise_nside is not None:
-                expected = hp.ud_grade(hp.ud_grade(numerator_sq, ia_noise_nside), nside_maps)
+            if ia_self_nside is not None:
+                expected = hp.ud_grade(hp.ud_grade(numerator_sq, ia_self_nside), nside_maps)
                 if np.sum(expected[good]) > 0:
                     numerator_sq = expected * np.sum(numerator_sq[good]) / np.sum(expected[good])
             ratio = np.zeros(npix, dtype=float)
             use = good & (var_noise > 0)
-            ratio[use] = 0.5 * numerator_sq[use] / var_noise[use]
+            if ia_cap_alpha is None:
+                ratio[use] = 0.5 * numerator_sq[use] / var_noise[use]
+            else:
+                # local cap (see make_WL_sample): s = min(1, sqrt(alpha var_noise / var_IA))
+                var_IA_cap = 0.5 * numerator_sq
+                cap = np.ones(npix, dtype=float)
+                capped = good & (var_IA_cap > 0) & (var_IA_cap > ia_cap_alpha * var_noise)
+                cap[capped] = np.sqrt(ia_cap_alpha * var_noise[capped] / var_IA_cap[capped])
+                ratio[use] = cap[use]**2 * var_IA_cap[use] / var_noise[use]
+                ratio[use & capped] = ia_cap_alpha                  # exact (no roundoff above alpha)
+                g1_map = g1_map + cap * h1_map
+                g2_map = g2_map + cap * h2_map
+                gamma1_map = dm[tomo] * g1_map
+                gamma2_map = dm[tomo] * g2_map
+                cap_out = dict(ia_cap_factor=cap, ia_var_noise=var_noise.copy(), ia_var_IA=var_IA_cap)
+                del h1_map, h2_map
             ia_noise_factor[use] = np.sqrt(np.clip(1.0 - ratio[use], 0.0, 1.0))
             if np.mean(ratio[use] > 1) > 0.001:
                 print(f"BFD bin {tomo}: IA variance > noise variance in {100*np.mean(ratio[use] > 1):.2f}% "
@@ -908,6 +1180,7 @@ def make_BFD_sample(
                 "d_map": d_map,
                 "q_noise_scale_map": q_noise_scale_map,
                 "ia_noise_factor": ia_noise_factor,
+                **(cap_out if ia_cap_alpha is not None else {}),
                 "var_bfd": var_bfd,
                 "e1": e1_sim,
                 "e2": e2_sim,

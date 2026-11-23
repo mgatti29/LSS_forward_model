@@ -1,0 +1,78 @@
+{
+ "bin0": {
+  "mask_equal_N3": true,
+  "n_gal_equal_N3": true,
+  "global_mean_map": [
+   -8.641474168603325e-06,
+   -0.00011495583934229667
+  ],
+  "global_shear_retained_meta": [
+   -8.641474168603486e-06,
+   -0.00011495583934228014
+  ],
+  "noise_var_measured_over_pred": 1.0002080791747654,
+  "noise_var_ratio_by_N": {
+   "3-6": 1.0016692131268303,
+   "6-12": 1.0003123923357633,
+   "12-25": 1.0002045972851044,
+   "25-50": 1.0000874313396717,
+   "50-1000000": 0.9976411534877477
+  },
+  "V_rotation_invariant": true,
+  "nla_sc": {
+   "mask_equal": true,
+   "unit_response_max_abs": 5.5294310796760726e-17,
+   "sc_cv": 1.0819986628993639,
+   "sc_total_variance_conserved": 1.0000000000000007,
+   "noise_realised_over_target": 0.9989661482380298
+  },
+  "halo_cap": {
+   "mask_equal": true,
+   "unit_response_max_abs": 7.589415207398531e-17,
+   "sc_cv": 1.0819986628993639,
+   "frac_capped": 5.979565830369019e-06,
+   "max_capped_ratio": 0.5526330743435754,
+   "white_total_over_budget_global": 1.0,
+   "white_total_over_budget_pixel_maxdev": NaN
+  },
+  "legacy_ml_bit_identical": true
+ },
+ "bin3": {
+  "mask_equal_N3": true,
+  "n_gal_equal_N3": true,
+  "global_mean_map": [
+   0.00025757494956647867,
+   -0.00011757203036615999
+  ],
+  "global_shear_retained_meta": [
+   0.00025757494956647287,
+   -0.00011757203036615691
+  ],
+  "noise_var_measured_over_pred": 1.0001845583292002,
+  "noise_var_ratio_by_N": {
+   "3-6": 0.9971328145618623,
+   "6-12": 1.0024649340077176,
+   "12-25": 1.0006635023951633,
+   "25-50": 0.9996833743279624,
+   "50-1000000": 1.00497462056596
+  },
+  "V_rotation_invariant": true,
+  "nla_sc": {
+   "mask_equal": true,
+   "unit_response_max_abs": 1.0977546996415732e-16,
+   "sc_cv": 1.0820133258125422,
+   "sc_total_variance_conserved": 0.9999999999999998,
+   "noise_realised_over_target": 1.0007687420021667
+  },
+  "halo_cap": {
+   "mask_equal": true,
+   "unit_response_max_abs": 1.6479873021779667e-16,
+   "sc_cv": 1.0820133258125422,
+   "frac_capped": 4.001152331871579e-06,
+   "max_capped_ratio": 0.3072137366497978,
+   "white_total_over_budget_global": 1.0000000000000002,
+   "white_total_over_budget_pixel_maxdev": NaN
+  },
+  "legacy_ml_bit_identical": true
+ }
+}

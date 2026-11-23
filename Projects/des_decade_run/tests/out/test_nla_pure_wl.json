@@ -1,0 +1,16 @@
+{
+ "wl": {
+  "legacy_bit_identical": true,
+  "pure": {
+   "IA_term_b16_minus_b0_maxabs": 5.551115123125783e-17,
+   "IA_term_b_dependence_rms_rel": 8.6232874074325e-14,
+   "catalogue_maxabs": 2.220446049250313e-16
+  },
+  "old": {
+   "IA_term_b16_minus_b0_maxabs": 0.0006001395661072874,
+   "IA_term_b_dependence_rms_rel": 0.5106705059549138,
+   "catalogue_maxabs": 0.0005881367747851696
+  },
+  "default_is_pure": true
+ }
+}

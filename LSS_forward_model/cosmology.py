@@ -287,7 +287,7 @@ def read_sims_params(path):
             h_dimless = h = params.get("h")
             
             # compute Omega_nu from masses
-            Omega_nu = float(m_ncdm.strip("'[").strip("']")) / (93.14 * h_dimless**2)
+            Omega_nu = float(m_ncdm.strip("'[").strip("']")) / (93.14 * h**2)
             m_nu = float(m_ncdm.strip("'[").strip("']")) 
             # radiation (approx, since not explicitly given)
             Omega_r = 2.47e-5 / h_dimless**2  # photons only (can refine)
@@ -454,7 +454,8 @@ def make_cosmo_bundle(sims_parameters):
     },
     )
     cosmo_pyccl = ccl.Cosmology(**cosmo_kwargs)
-
+    
+    
     # ---- Colossus-friendly dict (no Colossus import here)
     colossus_params = {
         'flat': True,

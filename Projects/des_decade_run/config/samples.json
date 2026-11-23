@@ -1,0 +1,122 @@
+{
+ "_doc": "Shear samples of the DES/DECADE run. Paths in 'large_inputs' refer to keys of config/large_inputs.json (staged outside git); 'data/...' paths are relative to Projects/des_decade_run. Per mock: one row of the paired n(z)/m realisations (DESY6 mdet, BFD), or the mean n(z) with Gaussian dz and m (DECADE). 2026-11-06.",
+ "nside_maps": 1024,
+ "samples": {
+  "DESY6": {
+   "shear_method": "metadetection",
+   "maker": "lensing.make_WL_sample",
+   "catalogue": {
+    "large_inputs": "cat_DESY6"
+   },
+   "nz_m": {
+    "model": "paired_realisations",
+    "large_inputs": "nzm_DESY6_20k",
+    "note": "row k gives n(z) (nzs[k]) and m (ms[:, k]); dz = 0. Final mdet product (confirmed by user 2026-11-06)"
+   },
+   "nz_mean": "data/nz_DESY6.npy",
+   "sc_calibration": "data/SC_v2_DES_nside1024_sim1.json"
+  },
+  "BFD": {
+   "shear_method": "BFD",
+   "maker": "bfd_utils.make_BFD_sample",
+   "catalogue": {
+    "large_inputs": "cat_BFD_N3",
+    "previous": "cat_BFD (full light catalogue, ml estimator; until 2026-11-20)"
+   },
+   "nz_m": {
+    "model": "paired_realisations",
+    "large_inputs": "nzm_BFD_20k",
+    "note": "20k random rows of the 633,514 BFD-calibrated SOMPZ realisations (nonneg GLS calibration, 2026-11-06); include photo-z and calibration uncertainty; dz = 0"
+   },
+   "nz_mean": "data/nz_BFD.npy",
+   "sc_calibration": "data/SC_v2_BFD_nside1024_sim1.json",
+   "estimator": {
+    "type": "count",
+    "nmin": 3,
+    "meta": "meta_BFD_N3",
+    "mask": "mask_BFD_N3",
+    "doc": "2026-11-20: g_p = -(1/N_p) Rbar^-1 Q_p, Rbar = global full-catalogue response (meta Rbar_code_sign, unrotated), fixed mask N_p >= 3 (N3 catalogue), unit shear response, exact noise variance V cR/N^2, analytic SC normalisation; lam = full-catalogue expected counts from the mask file. sc_calibration is NOT used (ml-estimator specific)."
+   }
+  },
+  "NGC": {
+   "shear_method": "metacalibration (DECADE)",
+   "maker": "lensing.make_WL_sample",
+   "catalogue": {
+    "large_inputs": "cat_NGC"
+   },
+   "nz_m": {
+    "model": "gaussian",
+    "nz": "data/nz_NGC.npy",
+    "dz_mean": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "dz_sigma": [
+     0.0163,
+     0.0139,
+     0.0101,
+     0.0117
+    ],
+    "m_mean": [
+     -0.0092,
+     -0.019,
+     -0.04,
+     -0.0373
+    ],
+    "m_sigma": [
+     0.00296,
+     0.00421,
+     0.00428,
+     0.00462
+    ],
+    "note": "DECADE cosmic shear, arXiv:2509.03582 Table 1 (first column NGC, second SGC; NGC/SGC assignment as in the previous mock script)"
+   },
+   "nz_mean": "data/nz_NGC.npy",
+   "sc_calibration": "data/SC_v2_NGC_nside1024_sim1.json"
+  },
+  "SGC": {
+   "shear_method": "metacalibration (DECADE)",
+   "maker": "lensing.make_WL_sample",
+   "catalogue": {
+    "large_inputs": "cat_SGC"
+   },
+   "nz_m": {
+    "model": "gaussian",
+    "nz": "data/nz_SGC.npy",
+    "dz_mean": [
+     0,
+     0,
+     0,
+     0
+    ],
+    "dz_sigma": [
+     0.0161,
+     0.014,
+     0.01,
+     0.0116
+    ],
+    "m_mean": [
+     -0.0133,
+     -0.0226,
+     -0.0367,
+     -0.0572
+    ],
+    "m_sigma": [
+     0.00472,
+     0.00657,
+     0.00697,
+     0.00804
+    ],
+    "note": "DECADE cosmic shear, arXiv:2509.03582 Table 1 (first column NGC, second SGC; NGC/SGC assignment as in the previous mock script). The previous script had m_sigma bin 2 = 0.004657 (typo for 0.00657) and rounded dz_sigma."
+   },
+   "nz_mean": "data/nz_SGC.npy",
+   "sc_calibration": "data/SC_v2_SGC_nside1024_sim1.json"
+  }
+ },
+ "priors": {
+  "ia": "config/ia_priors.json",
+  "source_clustering": "config/sc_priors.json"
+ }
+}

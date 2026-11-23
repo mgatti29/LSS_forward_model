@@ -1,0 +1,59 @@
+{
+ "_doc": "Large inputs staged outside git (STAGE, default /global/cfs/cdirs/m5099/des_decade_run_inputs; override with DES_DECADE_INPUTS). Check with data_prep/make_manifest.py --check.",
+ "files": {
+  "cat_BFD": {
+   "file": "cat_BFD.npy",
+   "size": 28129564098,
+   "sha256": "84229672f0d4025b7cb518ed59f3e6cb2e5055942fa433d32a7f87ee81869ed3",
+   "source": "/global/cfs/cdirs/m5099/DESY6_bfd/BFD_catalog_v5_UNBLINDED_light.npy"
+  },
+  "cat_DESY6": {
+   "file": "cat_DESY6.npy",
+   "size": 5586488977,
+   "sha256": "0ee6b815e11b3697a21a6411275eacc73959b75c89eb590d55417511e3bb25f3",
+   "source": "/global/cfs/cdirs/m5099/DESY3/DESY6.npy"
+  },
+  "cat_NGC": {
+   "file": "cat_NGC.npy",
+   "size": 4294860556,
+   "sha256": "a07f00be4d50054ca375c84467c6e19447557290f9a38162c75b1de641bb8277",
+   "source": "/global/cfs/cdirs/m5099/DESY3/DECADE_NGC.npy"
+  },
+  "cat_SGC": {
+   "file": "cat_SGC.npy",
+   "size": 2510236916,
+   "sha256": "b1ed6df15365aebc115db3ba517ea502373ef21c390d8b1fb5cca970a36fadfb",
+   "source": "/global/cfs/cdirs/m5099/DESY3/DECADE_SGC.npy"
+  },
+  "nzm_BFD_20k": {
+   "file": "nzm_BFD_20k.npz",
+   "size": 33442056,
+   "sha256": "27d0cadb1591dd94980ef213b54e191f944ca6f521fef5780573eb2cf1d15cc6",
+   "source": "/global/cfs/cdirs/m5099/DESY6_bfd/bfd_nonneg_calibration_sompz_realisations_20261106/bfd_20k_m_nz_realizations.npz"
+  },
+  "nzm_DESY6_20k": {
+   "file": "nzm_DESY6_20k.npz",
+   "size": 192640496,
+   "sha256": "67fbc0e8300a11d6ebe5af0c1a59ff23d41d1cdd236a2531176e5976c47a3797",
+   "source": "/global/cfs/cdirs/m5099/DESY3/20k_m_nz_realizations.npz"
+  },
+  "cat_BFD_N3": {
+   "file": "cat_BFD_N3.npy",
+   "size": 28112859938,
+   "sha256": "11fdc072562adb41a445caa360e095fd50191a35e2a3d3f734705d86a20cce77",
+   "source": "/global/cfs/cdirs/m5099/DESY6_bfd/BFD_catalog_v5_UNBLINDED_light_N3.npy"
+  },
+  "mask_BFD_N3": {
+   "file": "mask_BFD_N3.npz",
+   "size": 108731672,
+   "sha256": "5c1333bf2aa912df79e82db759fa86253d4a5662d340c475c87aa06d50b40ab2",
+   "source": "/global/cfs/cdirs/m5099/DESY6_bfd/BFD_light_N3_mask.npz"
+  },
+  "meta_BFD_N3": {
+   "file": "meta_BFD_N3.json",
+   "size": 18175,
+   "sha256": "4844314733ee3c603b504d25b6601003decb17db230fb2d41dec9f515bb28751",
+   "source": "/global/cfs/cdirs/m5099/DESY6_bfd/BFD_light_N3_meta.json"
+  }
+ }
+}

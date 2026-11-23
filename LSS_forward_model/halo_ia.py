@@ -499,7 +499,12 @@ def draw_sources(ra, dec, redshift, central_probability, satellite_mean, r200,
         east_offset = major * cos_angle - minor * sin_angle
         north_offset = major * sin_angle + minor * cos_angle
         distance = np.hypot(east_offset, north_offset)
-        comoving_distance = np.asarray(cosmology.comoving_distance(redshift[parent]).value)
+        # astropy integrates numerically per element (massive neutrinos / w0wa): interpolate on a fine grid
+        # instead (linear interpolation error ~ (dz)^2 D''/8 < 1e-9 relative for 2048 nodes per call)
+        z_parent = redshift[parent]
+        z_grid = np.linspace(z_parent.min(), z_parent.max(), 2048) if np.ptp(z_parent) > 0 else z_parent[:1]
+        d_grid = np.asarray(cosmology.comoving_distance(z_grid).value)
+        comoving_distance = np.interp(z_parent, z_grid, d_grid) if len(z_grid) > 1 else np.full(len(z_parent), d_grid[0])
         if np.any(comoving_distance <= 0):
             raise ValueError("Satellite angular profile requires positive distance")
         separation = distance / comoving_distance
@@ -592,12 +597,21 @@ def concentration_200c(mass, redshift, cosmology, *, sigma8, ns):
 
 def populate_IA_halo_shell(halos, target_count, model_parameters, cosmo_bundle,
                            sims_parameters, rng, shell_index=None, quarter_turns=0,
-                           position_ellipticity_scale=1.0, virtual=None):
+                           position_ellipticity_scale=1.0, virtual=None, footprint=None):
     """Populate one halo shell without retaining any other shell in memory.
 
     ``virtual`` is an optional (log10_mass, count) pair of halos below the
     catalogue mass cut (``virtual_halo_counts``); see ``occupation``. Every
     returned source carries the shell's ``hosted_fraction``.
+
+    ``footprint`` (optional boolean HEALPix map, RING, any NSIDE): the
+    occupation is solved on all halos of the shell (unchanged abundance
+    matching), but sources are drawn only for hosts in the footprint pixels
+    (dilate the survey mask so that satellites of hosts just outside are
+    kept).  Every source then carries ``footprint_fraction``, the expected
+    share of the shell's hosted sources that lie in the footprint, which
+    make_halo_IA_numerator uses to recover the full-sky source density.
+    The footprint refers to positions before ``quarter_turns``.
     """
     required = {"M", "z", "ra", "dec", "host_e1", "host_e2", "shape_valid"}
     missing = required.difference(halos)
@@ -619,6 +633,18 @@ def populate_IA_halo_shell(halos, target_count, model_parameters, cosmo_bundle,
         population["alpha"], population["f_c"],
         virtual_log10_mass=virtual_log10_mass, virtual_count=virtual_count)
     cosmology = cosmo_bundle["cosmo_astropy"]
+
+    footprint_fraction = 1.0
+    if footprint is not None:
+        halos.setdefault("catalogue_index", np.arange(len(mass)))
+        keep = np.asarray(footprint, bool)[hp.ang2pix(hp.npix2nside(len(footprint)), halos["ra"], halos["dec"],
+                                                     lonlat=True)]
+        expected = central.sum() + satellite.sum()
+        footprint_fraction = float((central[keep].sum() + satellite[keep].sum())/expected) if expected > 0 else 1.0
+        halos = {name: value[keep] for name, value in halos.items()}
+        mass, central, satellite = mass[keep], central[keep], satellite[keep]
+        if not keep.any():
+            return _empty_batch(shell_index)
 
     # Draw occupations first, then evaluate profiles only for satellite hosts.
     central_host = np.flatnonzero(rng.random(len(central)) < central)
@@ -647,8 +673,20 @@ def populate_IA_halo_shell(halos, target_count, model_parameters, cosmo_bundle,
                  host_catalogue_index=catalogue_index[source_host],
                  host_mass=mass[source_host],
                  hosted_fraction=np.full(len(source_host), metadata["hosted_fraction"], np.float32))
+    if footprint is not None:
+        batch["footprint_fraction"] = np.full(len(source_host), footprint_fraction, np.float32)
     if shell_index is not None:
         batch["shell_index"] = np.full(len(source_host), shell_index, np.uint16)
+    return batch
+
+
+def _empty_batch(shell_index=None):
+    batch = dict(ra_deg=np.zeros(0), dec_deg=np.zeros(0), redshift=np.zeros(0), is_central=np.zeros(0, bool),
+                 e1=np.zeros(0), e2=np.zeros(0), host_catalogue_index=np.zeros(0, np.int64),
+                 host_mass=np.zeros(0), hosted_fraction=np.zeros(0, np.float32),
+                 footprint_fraction=np.zeros(0, np.float32))
+    if shell_index is not None:
+        batch["shell_index"] = np.zeros(0, np.uint16)
     return batch
 
 
@@ -849,10 +887,40 @@ def _load_IA_halo_shell(path_halo_cat, shell_index, log10_mass_cut,
     return halos
 
 
+_SHELL_STATE = {}
+
+
+def _populate_catalog_shell(job):
+    """Load and populate one shell of a Parquet halo catalogue (also the worker of the parallel path)."""
+    shell_index, lower, upper, target_count, rng, virtual = job
+    st = _SHELL_STATE
+    if rng is None:
+        rng = np.random.default_rng([st["seed"], shell_index])
+    halos = _load_IA_halo_shell(st["path_halo_cat"], shell_index, st["log10_mass_cut"],
+                                lower_redshift=lower, upper_redshift=upper)
+    inside = ((np.asarray(halos["z"]) >= lower) & (np.asarray(halos["z"]) < upper)
+              & (np.asarray(halos["z"]) <= st["model_max"]))
+    halos = {name: np.asarray(value)[inside] for name, value in halos.items()}
+    if not len(halos["z"]):
+        if target_count > 0:
+            raise ValueError(f"No eligible IA hosts in shell {shell_index}")
+        return shell_index, None
+    if virtual == "compute":
+        virtual = None
+        if st["virtual_halos"]:
+            virtual = virtual_halo_counts(st["cosmo_bundle"]["cosmo_pyccl"], lower, upper, st["log10_mass_cut"],
+                                          mass_def="200c" if "M_SO" in halos else "fof")
+    return shell_index, populate_IA_halo_shell(
+        halos, target_count, st["model_parameters"], st["cosmo_bundle"], st["sims_parameters"], rng,
+        shell_index=shell_index, quarter_turns=st["quarter_turns"],
+        position_ellipticity_scale=st["position_ellipticity_scale"], virtual=virtual, footprint=st["footprint"])
+
+
 def iter_IA_halo_sources(path_halo_cat, sims_parameters, halo_catalog_log10mass_cut,
                           total_number_counts, nz_redshift, nz, shells_info,
                           model_parameters, cosmo_bundle, seed=913603, quarter_turns=0,
-                          position_ellipticity_scale=1.0, virtual_halos=True):
+                          position_ellipticity_scale=1.0, virtual_halos=True, footprint=None,
+                          nproc=None):
     """Yield populated IA sources one shell at a time from a Parquet catalogue.
 
     ``total_number_counts`` is the full-sky equivalent number of survey sources
@@ -861,6 +929,13 @@ def iter_IA_halo_sources(path_halo_cat, sims_parameters, halo_catalog_log10mass_
     [physical Msun] are added as counted-only virtual halos from the mass
     function of ``cosmo_bundle['cosmo_pyccl']`` (see ``occupation``); where the
     catalogue holds enough halos they have no effect.
+
+    ``footprint``: optional boolean HEALPix map; sources are drawn only for
+    hosts in it (see populate_IA_halo_shell).
+    ``nproc``: None (default) populates the shells in sequence with one random
+    stream (previous behaviour); an integer populates them in that many forked
+    processes, each shell with its own stream seeded by (seed, shell index),
+    so the result does not depend on nproc.
     """
     nz_redshift, nz = np.asarray(nz_redshift, float), np.asarray(nz, float)
     support = np.isfinite(nz_redshift) & np.isfinite(nz) & (nz > 0)
@@ -870,8 +945,14 @@ def iter_IA_halo_sources(path_halo_cat, sims_parameters, halo_catalog_log10mass_
     model_max = min(_halo_catalog_max_redshift(path_halo_cat), target_max)
     z_near = np.asarray(shells_info["z_near"], float)[::-1]
     z_far = np.asarray(shells_info["z_far"], float)[::-1]
-    rng = np.random.default_rng(seed)
+    _SHELL_STATE.clear()
+    _SHELL_STATE.update(path_halo_cat=path_halo_cat, log10_mass_cut=halo_catalog_log10mass_cut,
+                        model_max=model_max, virtual_halos=virtual_halos, cosmo_bundle=cosmo_bundle,
+                        model_parameters=model_parameters, sims_parameters=sims_parameters,
+                        quarter_turns=quarter_turns, position_ellipticity_scale=position_ellipticity_scale,
+                        footprint=footprint, seed=seed)
 
+    jobs = []
     for shell_index, (lower, upper) in enumerate(zip(z_near, z_far)):
         lower, upper = max(0.0, lower), min(upper, model_max)
         if upper <= lower:
@@ -879,26 +960,30 @@ def iter_IA_halo_sources(path_halo_cat, sims_parameters, halo_catalog_log10mass_
         target_count = expected_counts_in_redshift_bins(
             [lower, upper], nz_redshift, nz, total_number_counts,
             normalization_bounds=(0.0, target_max))[0]
-        halos = _load_IA_halo_shell(
-            path_halo_cat, shell_index, halo_catalog_log10mass_cut,
-            lower_redshift=lower, upper_redshift=upper)
-        inside = ((np.asarray(halos["z"]) >= lower)
-                  & (np.asarray(halos["z"]) < upper)
-                  & (np.asarray(halos["z"]) <= model_max))
-        halos = {name: np.asarray(value)[inside] for name, value in halos.items()}
-        if not len(halos["z"]):
-            if target_count > 0:
-                raise ValueError(f"No eligible IA hosts in shell {shell_index}")
-            continue
-        virtual = None
-        if virtual_halos:
-            virtual = virtual_halo_counts(cosmo_bundle["cosmo_pyccl"], lower, upper,
-                                          halo_catalog_log10mass_cut,
-                                          mass_def="200c" if "M_SO" in halos else "fof")
-        yield shell_index, populate_IA_halo_shell(
-            halos, target_count, model_parameters, cosmo_bundle, sims_parameters,
-            rng, shell_index=shell_index, quarter_turns=quarter_turns,
-            position_ellipticity_scale=position_ellipticity_scale, virtual=virtual)
+        jobs.append((shell_index, lower, upper, target_count))
+
+    if nproc is None:
+        rng = np.random.default_rng(seed)
+        for job in jobs:
+            shell_index, batch = _populate_catalog_shell(job + (rng, "compute"))
+            if batch is not None:
+                yield shell_index, batch
+        return
+
+    # everything that calls CAMB / OpenMP (CCL mass function) or caches (concentration grid) is computed
+    # here, before forking: OpenMP runtimes deadlock in forked children
+    mass_def = "200c" if "log_M200c_SO" in pq.ParquetFile(path_halo_cat).schema_arrow.names else "fof"
+    virtual = [virtual_halo_counts(cosmo_bundle["cosmo_pyccl"], lower, upper, halo_catalog_log10mass_cut,
+                                   mass_def=mass_def) if virtual_halos else None
+               for _, lower, upper, _ in jobs]
+    concentration_200c(np.array([1e13]), np.array([0.5]), cosmo_bundle["cosmo_astropy"],
+                       sigma8=sims_parameters["sigma_8"], ns=sims_parameters["n_s"])
+    import multiprocessing
+    with multiprocessing.get_context("fork").Pool(max(1, min(nproc, len(jobs)))) as pool:
+        for shell_index, batch in pool.imap(_populate_catalog_shell,
+                                            [job + (None, v) for job, v in zip(jobs, virtual)]):
+            if batch is not None:
+                yield shell_index, batch
 
 
 def build_IA_halo_sources_from_catalog(*args, show_progress=True, **kwargs):
@@ -1087,8 +1172,8 @@ def make_halo_IA_numerator(model_objects, ia_parameters, density, ngal_glass, ns
 
     # one shell at a time (sources are stored in shell order), to keep the memory low
     ordered = np.all(shell_index[1:] >= shell_index[:-1])
-    numerator = np.zeros((ntomo, npix), dtype=np.complex128)
-    numerator_sq = np.zeros((ntomo, npix))
+    # per source: index tomo * npix + pixel and the weighted marks; one bincount over all shells at the end
+    index_parts, mark_parts, mark_sq_parts = [], [], []
     for i in np.unique(shell_index):
         if ordered:
             rows = slice(np.searchsorted(shell_index, i, side='left'), np.searchsorted(shell_index, i, side='right'))
@@ -1118,18 +1203,44 @@ def make_halo_IA_numerator(model_objects, ia_parameters, density, ngal_glass, ns
         # survey sources per model source in this shell (virtual halos: unhosted, no IA)
         hosted = model_objects.get('hosted_fraction')
         hosted_fraction = 1. if hosted is None else float(np.mean(np.asarray(hosted[rows], float)))
+        # sources drawn only in a footprint (populate_IA_halo_shell(footprint=...)): full-sky density
+        in_footprint = model_objects.get('footprint_fraction')
+        if in_footprint is not None:
+            hosted_fraction *= float(np.mean(np.asarray(in_footprint[rows], float)))
 
-        for tomo in range(ntomo):
-            use = slice(None) if bin_counts is None else source_bin == tomo
-            n_model = len(pixel) if bin_counts is None else np.count_nonzero(use)
-            if ngal_glass[tomo, i] == 0 or n_model == 0:
-                continue
-            nbar = n_model/hosted_fraction/npix
-            sum_m = (np.bincount(pixel[use], weights=marks[use].real, minlength=npix)
-                     + 1j*np.bincount(pixel[use], weights=marks[use].imag, minlength=npix))
-            sum_m2 = np.bincount(pixel[use], weights=np.abs(marks[use])**2, minlength=npix)
-            numerator[tomo] += ngal_glass[tomo, i]/nbar * sum_m
-            numerator_sq[tomo] += (ngal_glass[tomo, i]/nbar)**2 * sum_m2
+        # weight of a model source of bin t: ngal_glass[t, i] / Nbar_ti, Nbar_ti = n_model / hosted_fraction / npix
+        if bin_counts is None:
+            n_model = np.full(ntomo, len(pixel))
+        else:
+            n_model = np.bincount(source_bin, minlength=ntomo)
+        weight_bin = np.where((ngal_glass[:, i] > 0) & (n_model > 0),
+                              ngal_glass[:, i]*hosted_fraction*npix/np.maximum(n_model, 1), 0.)
+        if bin_counts is None:
+            for tomo in np.flatnonzero(weight_bin):
+                index_parts.append(tomo*npix + pixel)
+                mark_parts.append(weight_bin[tomo]*marks)
+                mark_sq_parts.append(weight_bin[tomo]**2*np.abs(marks)**2)
+        else:
+            weight = weight_bin[source_bin]
+            keep = weight > 0
+            index_parts.append(source_bin[keep]*npix + pixel[keep])
+            mark_parts.append(weight[keep]*marks[keep])
+            mark_sq_parts.append(weight[keep]**2*np.abs(marks[keep])**2)
+
+    if index_parts:
+        index = np.concatenate(index_parts)
+        del index_parts
+        mark = np.concatenate(mark_parts)
+        del mark_parts
+        numerator = (np.bincount(index, weights=mark.real, minlength=ntomo*npix)
+                     + 1j*np.bincount(index, weights=mark.imag, minlength=ntomo*npix)).reshape(ntomo, npix)
+        del mark
+        numerator_sq = np.bincount(index, weights=np.concatenate(mark_sq_parts),
+                                   minlength=ntomo*npix).reshape(ntomo, npix)
+        del index, mark_sq_parts
+    else:
+        numerator = np.zeros((ntomo, npix), dtype=np.complex128)
+        numerator_sq = np.zeros((ntomo, npix))
 
     # shells beyond the halo lightcone (or without model sources) get no IA
     no_sources = np.ones(nshell, dtype=bool)

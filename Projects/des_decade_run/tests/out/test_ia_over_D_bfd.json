@@ -1,0 +1,15 @@
+{
+ "bfd_bin3": {
+  "legacy_bit_identical": true,
+  "g1_map_IA_minus_sI_over_D_maxabs": 8.326672684688674e-17,
+  "g2_map_IA_minus_sI_over_D_maxabs": 5.551115123125783e-17,
+  "var_IA_minus_half_nsq_over_D2_maxrel": 3.6820493044203364e-15,
+  "pixels_zero_budget": 10,
+  "cap_budget_ok": true,
+  "noise_factor_identity_maxabs": 2.220446049250313e-16,
+  "white_total_over_budget_pixel_maxdev": 8.881784197001252e-16,
+  "unit_response_max_abs": 9.540979117872439e-17,
+  "frac_capped": 1.0669739551657545e-05,
+  "var_IA_over_D_vs_I_mean": 6.6458624903939345
+ }
+}
