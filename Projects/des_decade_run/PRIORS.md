@@ -1,7 +1,7 @@
 # Intrinsic-alignment priors for the DES / DECADE / BFD mocks
 
 Adopted 2026-11-06.  Machine-readable version: `config/ia_priors.json`.
-Tests and outputs: `prior_tests/` (scripts) and `prior_tests/out/` (results).
+Tests and outputs (not in the repository): `/global/u2/m/mgatti/LSS_forward_model/Projects/des_decade_run/prior_tests/` (scripts) and `prior_tests/out/` (results).
 
 ## Adopted halo-IA prior, revision 2026-11-20 (supersedes the 2026-11-06 box below)
 

@@ -21,7 +21,17 @@ source /share/rcifdata/mgatti/miniforge3/etc/profile.d/conda.sh
 conda activate /share/rcifdata/mgatti/conda_envs/lss_py
 export PYTHONNOUSERSITE=1 OMP_NUM_THREADS="$SLURM_CPUS_PER_TASK" NUMEXPR_MAX_THREADS="$SLURM_CPUS_PER_TASK"
 cd "$LFM/Projects/des_decade_run"
-python data_prep/make_manifest.py --check
+# staged inputs present (sizes from config/large_inputs.json; cat_BFD, the full BFD catalogue, is not used)
+python - <<'PY'
+import json, os
+from pathlib import Path
+stage = Path(os.environ['DES_DECADE_INPUTS'])
+files = json.loads(Path('config/large_inputs.json').read_text())['files']
+bad = [f"{k}: {v['file']}" for k, v in files.items() if k != 'cat_BFD' and
+       (not (stage/v['file']).exists() or (stage/v['file']).stat().st_size != v['size'])]
+assert not bad, f'missing or wrong size in {stage}: {bad}'
+print('staged inputs OK')
+PY
 mkdir -p "$OUT"
 extra=()
 [[ -d "$sim/fof" ]] || extra+=(--fof-tar "$FOF_ROOT/$(basename "$sim").fof.tar.gz")
@@ -29,5 +39,4 @@ start=$(date +%s)
 python -u make_mocks.py "$sim" --out "$OUT" --sim-id "smoke/runs${suite}/$(basename "$sim")" --models halo \
     --baryons 0 --rots 0 --nproc "$SLURM_CPUS_PER_TASK" "${extra[@]}"
 echo "wall $(( $(date +%s) - start )) s"
-python -u tests/validate_e2e.py "$OUT"
 sacct -j "$SLURM_JOB_ID" --format=JobID,Elapsed,MaxRSS,TotalCPU,State

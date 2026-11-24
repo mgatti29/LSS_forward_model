@@ -1,5 +1,5 @@
 {
- "_doc": "Large inputs staged outside git (STAGE, default /global/cfs/cdirs/m5099/des_decade_run_inputs; override with DES_DECADE_INPUTS). Check with data_prep/make_manifest.py --check.",
+ "_doc": "Large inputs staged outside git (STAGE, default /global/cfs/cdirs/m5099/des_decade_run_inputs; override with DES_DECADE_INPUTS). cat_BFD (full BFD catalogue) is not used by make_mocks.py (BFD uses cat_BFD_N3 + mask/meta).",
  "files": {
   "cat_BFD": {
    "file": "cat_BFD.npy",
