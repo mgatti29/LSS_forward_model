@@ -59,7 +59,7 @@ These two layers allow the same underlying realization to generate physically co
 ## Technical capabilities
 
 - Process N-body lightcones and construct HEALPix density shells
-- Build and manipulate halo lightcone catalogs
+- Build and manipulate halo lightcone catalogs from native PKDGRAV FoF files or NERSC parquet snapshots, with either `z_values.txt` dialect (see [docs/halo_lightcone_inputs.md](docs/halo_lightcone_inputs.md))
 - Generate weak-lensing shear and convergence maps and mock source catalogs
 - Model intrinsic alignments and source-clustering effects
 - Propagate photometric-redshift and shear-calibration uncertainties
@@ -125,6 +125,7 @@ Before advertising the tutorial as a quickstart, it should be tested once in a c
 |---|---|
 | `cosmology` | Cosmological parameters, distances, shells, and simulation metadata |
 | `halos` | Halo catalogs, coordinates, concentrations, and mass conversions |
+| `halo_inputs` | Halo snapshot formats and `z_values.txt` distance conventions for the halo lightcone |
 | `maps` | Density shells, lensing fields, intrinsic alignments, baryonification, and tSZ |
 | `lensing` | Weak-lensing samples, ellipticities, catalogs, and map I/O |
 | `theory` | Limber-theory calculations |

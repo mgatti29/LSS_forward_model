@@ -25,10 +25,20 @@ from LSS_forward_model.cosmology import recover_shell_info
 from LSS_forward_model.halo_inputs import (
     FOF_DTYPE_LEGACY, FOF_DTYPE_SO, encode_fof_records, find_halo_snapshot,
     identify_distance_columns, load_halo_snapshot, read_fof_binary,
-    shell_radial_edges_Mpc, _ccl_cosmology, _chi_Mpc)
+    shell_radial_edges_Mpc)
 from LSS_forward_model.halos import save_halocatalog
 from LSS_forward_model.PKDGRAV_and_postprocessing_utilities import (
     build_z_values_file, convert_fof_and_cleanup)
+
+def ccl_chi_Mpc(sp, z):
+    """χ(z) with the CCL cosmology save_halocatalog uses for halo redshifts."""
+    import pyccl as ccl
+    cosmo = ccl.Cosmology(Omega_c=sp["Omega_cdm"], Omega_b=sp["Omega_b"], h=sp["h"],
+                          sigma8=sp["sigma_8"], n_s=sp["n_s"], w0=sp["w0"], wa=sp["wa"],
+                          m_nu=[sp["m_nu"] / 3] * 3, mass_split="equal",
+                          matter_power_spectrum="linear")
+    return ccl.comoving_radial_distance(cosmo, 1.0 / (1.0 + np.asarray(z, float)))
+
 
 COSMOLOGIES = {
     "lcdm": dict(w0=-1.0, wa=0.0, h=0.67),
@@ -182,14 +192,13 @@ def test_zero_so_columns_are_not_propagated(tmp_path):
 @pytest.mark.parametrize("name", list(COSMOLOGIES))
 def test_distance_dialects_identified_and_edges_physical(tmp_path, name):
     sp, native, nersc = make_simulation(str(tmp_path), name, n_halos=10)
-    cosmo = _ccl_cosmology(sp)
     gower = recover_shell_info(os.path.join(native, "z_values.txt"))
     package = recover_shell_info(os.path.join(nersc, "z_values.txt"))
     # the redshift columns of both dialects agree (both come from run.log)
     np.testing.assert_array_equal(gower["Step"], package["Step"])
     for key in ("z_far", "z_near"):
         np.testing.assert_allclose(gower[key], package[key], atol=1e-5)
-    assert identify_distance_columns(package, sp)["dialect"] == "native"
+    assert identify_distance_columns(package, sp)["dialect"] == "package"
     assert identify_distance_columns(gower, sp)["dialect"] == "gower"
     n_p, f_p, info_p = shell_radial_edges_Mpc(package, sp)
     n_g, f_g, info_g = shell_radial_edges_Mpc(gower, sp)
@@ -198,7 +207,7 @@ def test_distance_dialects_identified_and_edges_physical(tmp_path, name):
     np.testing.assert_array_equal(n_p, package["cmd_near"])
     np.testing.assert_array_equal(f_p, package["cmd_far"])
     # both give the physical edges of the run's cosmology
-    true_far = _chi_Mpc(cosmo, package["z_far"])
+    true_far = ccl_chi_Mpc(sp, package["z_far"])
     low = package["z_far"] < 10
     np.testing.assert_allclose(f_p[low], true_far[low], rtol=2e-3)
     np.testing.assert_allclose(f_g[low], true_far[low], rtol=2e-3)
@@ -244,7 +253,7 @@ def test_native_and_nersc_pathways_give_identical_lightcones(tmp_path, name, so)
     assert md_n[key + b"snapshot_formats"] == b"fof_binary"
     assert md_p[key + b"snapshot_formats"] == b"parquet"
     assert md_n[key + b"distance_columns_dialect"] == b"gower"
-    assert md_p[key + b"distance_columns_dialect"] == b"native"
+    assert md_p[key + b"distance_columns_dialect"] == b"package"
 
     # every halo lies in the redshift range of the snapshot it was taken from
     z = t_native["redshift"].to_numpy() / 1e4
@@ -262,12 +271,11 @@ def test_native_and_nersc_pathways_give_identical_lightcones(tmp_path, name, so)
     assert used == expected
 
     # the stored redshift is z(radius) for the run's cosmology (incl. w0, wa)
-    cosmo = _ccl_cosmology(sp)
     ra = np.radians(t_native["ra_deg"].to_numpy().astype(float))
     dec = np.radians(t_native["dec_deg"].to_numpy().astype(float))
     assert np.all(np.isfinite(ra + dec))
-    chi = _chi_Mpc(cosmo, z)
-    chi_hi = _chi_Mpc(cosmo, z + 1e-4)
+    chi = ccl_chi_Mpc(sp, z)
+    chi_hi = ccl_chi_Mpc(sp, z + 1e-4)
     # radius recovered from the box: each halo sits in [edge_near, edge_far) of its step
     near, far, _ = shell_radial_edges_Mpc(shells, sp)
     idx = {s: i for i, s in enumerate(shells["Step"])}
@@ -292,15 +300,53 @@ def test_hypatia_driver_layout_without_conversion(tmp_path):
     assert t["redshift"].to_numpy().max() / 1e4 > MAX_Z - 0.01
 
 
+def test_baryonification_and_halo_ia_readers_see_identical_catalogues(tmp_path):
+    """The two consumers of the lightcone read the same halos from both pathways."""
+    from LSS_forward_model.halos import load_halo_catalog
+    from LSS_forward_model.halo_ia import _load_IA_halo_shell
+    sp, native, nersc = make_simulation(str(tmp_path), "w0wa", so=True)
+    paths = {}
+    for name, d in (("native", native), ("nersc", nersc)):
+        paths[name] = str(tmp_path / f"{name}.parquet")
+        build(d, sp, paths[name], include_ia_shapes=True)
+    # baryonification reader (FoF masses, no FoF->SO calibration as in production)
+    bar = {n: load_halo_catalog(p, None, sp, 12.5, no_calib=True, verbose=False) for n, p in paths.items()}
+    assert set(bar["native"]) == set(bar["nersc"]) and "M_SO" in bar["native"]
+    for key in bar["native"]:
+        np.testing.assert_array_equal(bar["native"][key], bar["nersc"][key])
+    assert np.all(bar["native"]["M_SO"] > 1e10)        # real SO masses, not 10**0
+    assert bar["native"]["z"].max() > MAX_Z - 0.01
+    # halo IA reader, shell by shell
+    shells = recover_shell_info(os.path.join(native, "z_values.txt"))
+    shell_index = np.unique(pq.read_table(paths["native"], columns=["shell_index"])["shell_index"].to_numpy())
+    assert len(shell_index) == np.sum(shells["z_near"] < MAX_Z)
+    for i in shell_index:
+        a = _load_IA_halo_shell(paths["native"], int(i), 12.5)
+        b = _load_IA_halo_shell(paths["nersc"], int(i), 12.5)
+        for key in a:
+            np.testing.assert_array_equal(a[key], b[key])
+
+
+def test_zero_so_masses_do_not_reach_halo_ia(tmp_path):
+    """Legacy-layout runs (zero SO fields) must not give halo IA an M_SO = 1 Msun column."""
+    from LSS_forward_model.halo_ia import _load_IA_halo_shell
+    sp, native, nersc = make_simulation(str(tmp_path), "lcdm", so=False, n_halos=600)
+    out = str(tmp_path / "nersc.parquet")
+    table, _ = build(nersc, sp, out, include_ia_shapes=True)
+    assert "log_M200c_SO" not in table.column_names
+    i = int(table["shell_index"].to_numpy()[0])
+    assert "M_SO" not in _load_IA_halo_shell(out, i, 12.5)
+
+
 # ---------------------------------------------------------------------------
 # Real shell tables on NERSC (skipped elsewhere)
 # ---------------------------------------------------------------------------
 
 REAL_SHELL_TABLES = [
     # (simulation directory, expected dialect)
-    ("/global/cfs/cdirs/m5099/GowerSt2/runsU/run001", "native"),
-    ("/global/cfs/cdirs/m5099/GowerSt2/Fiducial/1_big", "native"),
-    ("/global/cfs/cdirs/m5099/GowerSt2/Flamingo_big", "native"),
+    ("/global/cfs/cdirs/m5099/GowerSt2/runsU/run001", "package"),
+    ("/global/cfs/cdirs/m5099/GowerSt2/Fiducial/1_big", "package"),
+    ("/global/cfs/cdirs/m5099/GowerSt2/Flamingo_big", "package"),
     ("/global/cfs/cdirs/m5099/GowerSt2/runsV/run001", "gower"),
     ("/pscratch/sd/m/mgatti/run001", "gower"),
 ]

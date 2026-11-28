@@ -315,36 +315,17 @@ def shell_comoving_distance_Mpc(z, sims_parameters):
     return _astropy_cosmology(sims_parameters).comoving_distance(np.asarray(z, float)).value
 
 
-def _ccl_cosmology(sims_parameters, lcdm=False):
-    import pyccl as ccl
-    m_nu = float(sims_parameters["m_nu"])
-    return ccl.Cosmology(
-        Omega_c=sims_parameters["Omega_cdm"], Omega_b=sims_parameters["Omega_b"],
-        h=sims_parameters["h"], sigma8=sims_parameters["sigma_8"], n_s=sims_parameters["n_s"],
-        w0=-1.0 if lcdm else sims_parameters["w0"], wa=0.0 if lcdm else sims_parameters["wa"],
-        m_nu=[m_nu / 3] * 3, mass_split="equal", matter_power_spectrum="linear",
-        extra_parameters={"camb": {"dark_energy_model": "ppf", "halofit_version": "mead2020"}})
+def identify_distance_columns(shells_info, sims_parameters, rtol_package=2e-3, rtol_gower=1e-2):
+    """Identify which dialect the ``cmd_*`` columns of a shell table are in.
 
+    The numbers are used, not the header (one legacy writer labels Mpc as
+    Mpc/h). ``cmd_far`` of the rows with 0 < z_far <= 10 is compared with
 
-def _chi_Mpc(cosmo, z):
-    import pyccl as ccl
-    z = np.asarray(z, dtype=float)
-    return ccl.comoving_radial_distance(cosmo, 1.0 / (1.0 + z))
+      package   χ(z) in Mpc for the run's (w0, wa)   (build_z_values_file)
+      gower     h·χ_{w=-1}(z), Mpc/h for w = -1     (Gower St writer)
 
-
-def identify_distance_columns(shells_info, sims_parameters, rtol_native=2e-3, rtol_other=1e-2):
-    """Identify what the ``cmd_*`` columns of a shell table contain.
-
-    The identification uses the numbers, not the header, because one legacy
-    writer labels Mpc as Mpc/h. Rows with 0 < z_far <= 10 are compared with
-
-      native      χ(z) in Mpc for the run's cosmology   (package dialect)
-      gower       h·χ_{w=-1}(z), i.e. Mpc/h for w = -1  (Gower St dialect)
-      Mpc_h       h·χ(z), Mpc/h for the run's cosmology
-      lcdm_Mpc    χ_{w=-1}(z) in Mpc
-
-    Returns a dict with ``dialect`` (one of the above, or ``'unknown'``) and
-    the maximum relative deviation from each hypothesis.
+    Returns ``{'dialect': 'package' | 'gower' | 'unknown',
+    'max_rel_deviation': {...}}``.
     """
     z_far = np.asarray(shells_info["z_far"], dtype=float)
     cmd_far = np.asarray(shells_info["cmd_far"], dtype=float)
@@ -352,16 +333,16 @@ def identify_distance_columns(shells_info, sims_parameters, rtol_native=2e-3, rt
     if not np.any(rows):
         raise ValueError("No shell with 0 < z_far <= 10 to identify the distance columns")
     h = float(sims_parameters["h"])
-    chi = shell_comoving_distance_Mpc(z_far[rows], sims_parameters)
-    chi_lcdm = _astropy_cosmology(sims_parameters, lcdm=True).comoving_distance(z_far[rows]).value
-    hypotheses = {"native": chi, "gower": h * chi_lcdm, "Mpc_h": h * chi, "lcdm_Mpc": chi_lcdm}
+    package = shell_comoving_distance_Mpc(z_far[rows], sims_parameters)
+    gower = h * _astropy_cosmology(sims_parameters, lcdm=True).comoving_distance(z_far[rows]).value
     deviation = {name: float(np.max(np.abs(cmd_far[rows] / ref - 1.0)))
-                  for name, ref in hypotheses.items()}
-    if deviation["native"] <= rtol_native:
-        dialect = "native"
+                 for name, ref in (("package", package), ("gower", gower))}
+    if deviation["package"] <= rtol_package:
+        dialect = "package"
+    elif deviation["gower"] <= rtol_gower:
+        dialect = "gower"
     else:
-        others = {k: v for k, v in deviation.items() if k != "native" and v <= rtol_other}
-        dialect = min(others, key=others.get) if others else "unknown"
+        dialect = "unknown"
     return {"dialect": dialect, "max_rel_deviation": deviation}
 
 
@@ -374,10 +355,9 @@ def shell_radial_edges_Mpc(shells_info, sims_parameters, convention="auto"):
         ``file_Mpc``: use ``cmd_near``/``cmd_far`` as Mpc (package files).
         ``from_redshift``: χ(z_near), χ(z_far) for the run's (w0, wa) with
         ``shell_comoving_distance_Mpc`` (what build_z_values_file writes).
-        ``auto``: ``file_Mpc`` if the columns are χ(z) in Mpc for this
-        cosmology (within 0.2%); ``from_redshift`` if they match a known
-        other convention (Gower St h·χ_{w=-1}, Mpc/h, or w = -1 Mpc);
-        otherwise raise.
+        ``auto``: ``file_Mpc`` for the package dialect (χ(z) in Mpc for this
+        cosmology, within 0.2%); ``from_redshift`` for the Gower St dialect
+        (h·χ_{w=-1}(z), within 1%); otherwise raise.
 
     Returns
     -------
@@ -391,7 +371,7 @@ def shell_radial_edges_Mpc(shells_info, sims_parameters, convention="auto"):
     if convention == "auto":
         ident = identify_distance_columns(shells_info, sims_parameters)
         info.update(ident)
-        if ident["dialect"] == "native":
+        if ident["dialect"] == "package":
             convention = "file_Mpc"
         elif ident["dialect"] == "unknown":
             raise ValueError(
