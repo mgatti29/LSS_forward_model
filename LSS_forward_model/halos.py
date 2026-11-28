@@ -17,6 +17,7 @@ import BaryonForge as bfn
 import astropy.io.fits as fits
 from astropy.cosmology import wCDM, Flatw0waCDM
 import astropy.units as u
+from .halo_inputs import load_halo_snapshot, shell_radial_edges_Mpc
 from .halo_ia import (
     HALO_ELLIPTICITY_SCALE,
     build_IA_halo_sources,
@@ -42,7 +43,7 @@ from .halo_ia import (
 
 def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapshots_path='',
                      catalog_path='halo_catalog.parquet', log10_mass_limit=None,
-                     include_ia_shapes=True):
+                     include_ia_shapes=True, distance_convention='auto'):
 
     """
     Generate a lightcone halo catalog by assembling halo snapshots across redshift shells, 
@@ -69,9 +70,27 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapsh
         Project and store compact halo ellipticities. Disable this for a
         baryonification-only catalogue.
 
+    distance_convention : {'auto', 'file_Mpc', 'from_redshift'}, optional
+        How each snapshot's radial edges in comoving Mpc are obtained (see
+        ``halo_inputs.shell_radial_edges_Mpc``). ``'auto'`` (default)
+        identifies the ``cmd_*`` columns from their values. Package
+        ``z_values.txt`` files (χ(z) in Mpc for this cosmology) are used as
+        written, so NERSC catalogues are unchanged. Gower St files
+        (h·χ_{w=-1}(z) in Mpc/h) get edges χ(z_near), χ(z_far) computed from
+        the redshift columns with this run's cosmology. Anything else raises.
+
+    Supported inputs
+    ----------------
+    Halo snapshots are located per step by ``halo_inputs.find_halo_snapshot``:
+    ``run.SSSSS.fofstats.parquet`` (NERSC preprocessing) or the native
+    PKDGRAV binary ``fof/run.SSSSS.fofstats.0`` / ``run.SSSSS.fofstats.0``
+    (with or without SO fields). Both are normalised to halo positions in
+    comoving Mpc in [0, L), with identical encoded masses, radii and shapes.
+    SO columns are written only when the snapshots carry SO measurements.
+
     Notes
     -----
-    - Halos are replicated in a cubic grid until they cover the spherical shell between cmd_near and cmd_far.
+    - Halos are replicated in a cubic grid until they cover each snapshot's spherical shell [χ(z_near), χ(z_far)).
     - Box replication ensures volume completeness for the shell.
     - Uses `pyccl` to compute comoving distances for redshift-distance interpolation.
     - Outputs a FITS file containing positions, redshifts, masses, and optional angular coordinates.
@@ -91,162 +110,6 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapsh
 
 
     halo_snapshots_path = os.path.join(os.fspath(halo_snapshots_path), '')
-
-    def load_snapshot(path_base, c_, Lbox_Mpc, sims_parameters, log10_mass_limit=None,
-                      include_ia_shapes=True):
-        """
-        Loads halo data from a specified path based on the mode.
-    
-        :param path_base: Base path to the data
-        :param c_: Configuration index
-        :param mode: Mode of the data ('rockstar' or other)
-        :param f_mass: Mass factor
-        Lbox_Mpc: Lbox in Mpc
-        :return: Dictionary containing halo data
-        """
-
-        Om0 = float(sims_parameters["Omega_m"])
-        w0  = float(sims_parameters["w0"])
-        try:
-            wa  = float(sims_parameters["wa"])
-        except:
-            wa = 0.
-        H0  = float(sims_parameters["h"]) * 100.0
-        Lbox_Mpc = float(sims_parameters["dBoxSize Mpc/h"]) / float(sims_parameters["h"])
-        cosmo = Flatw0waCDM(H0=H0, Om0=Om0, w0=w0, wa=wa) if abs(wa) > 0 else wCDM(H0=H0, Om0=Om0, w0=w0, Ode0=1-Om0)
-        Lbox = Lbox_Mpc * u.Mpc
-        f_mass = (Lbox**3 * cosmo.critical_density(0).to(u.Msun/u.Mpc**3)).value  # Msun
-        
-
-
-        c__ = f'{int(c_):03}'
-    
-        p = f'{path_base}run.00{c__}.fofstats.parquet'
-        p0 = f'{path_base}/fof/run.{int(c_):05d}.fofstats.0'
-        pkd_halo_dtype = np.dtype([("rPot", ("f4", 3)), ("minPot", "f4"), ("rcen", ("f4", 3)),
-                                   ("rcom", ("f4", 3)), ("cvom", ("f4", 3)), ("angular", ("f4", 3)),
-                                   ("inertia", ("f4", 6)), ("sigma", "f4"), ("rMax", "f4"),
-                                   ("fMAss", "f4"), ("fEnvironDensity0", "f4"),
-                                   ("fEnvironDensity1", "f4"), ("rHalf", "f4")])
-    
-        has_native_m200c = False
-        try:
-            try:
-                columns_to_read = ['halo_center', 'rmax', 'log10M', 'log10M200c', 'r200c']
-                if include_ia_shapes:
-                    columns_to_read += ['inertia_auto', 'inertia_cross']
-                halos = pq.read_table(p, columns=columns_to_read)
-                has_native_m200c = "log10M200c" in halos.column_names
-            except:
-                columns_to_read = ['halo_center', 'rmax', 'log10M']
-                if include_ia_shapes:
-                    columns_to_read += ['inertia_auto', 'inertia_cross']
-                halos = pq.read_table(p, columns=columns_to_read)
-                has_native_m200c = "log10M200c" in halos.column_names
-        except:
-            try:
-    
-                halos_ = np.fromfile(p0, count=-1, dtype=pkd_halo_dtype)
-                halo_center = Lbox_Mpc * (halos_["rPot"]  + halos_["rcen"] + 0.5)
-                rmax = Lbox_Mpc * halos_["rMax"]
-                log10M = np.log10((halos_['fMAss'] * f_mass))
-                # Native PKDGRAV order is (xx,xy,xz,yy,yz,zz).  The portable
-                # catalogue convention is (xx,yy,zz,xy,xz,yz).
-                if include_ia_shapes:
-                    inertia_tensor = halos_["inertia"][:, [0, 3, 5, 1, 2, 4]].astype(np.float64)
-    
-                halos = dict()
-                halos["halo_center"] = halo_center.tolist()
-                halos["rmax"] =  (rmax* 1000).astype('uint16')
-                halos["log10M"] = (log10M* 1000).astype('uint16')
-                if include_ia_shapes:
-                    halos["inertia_tensor"] = inertia_tensor
-    
-                del halos_
-                
-            except:
-                print ('failed ',p)
-                sd_
-        if isinstance(halos, pa.Table):
-            encoded_mass = halos['log10M'].combine_chunks().to_numpy()
-        else:
-            encoded_mass = np.asarray(halos['log10M'])
-        positive_mass = encoded_mass > 0
-        legacy_fof_log10_offset = (
-            4.0
-            if (
-                np.any(positive_mass)
-                and np.min(encoded_mass[positive_mass]) / 1000.0 < 10.0
-            )
-            else 0.0
-        )
-
-        if log10_mass_limit is not None:
-            decoded_log10_mass = (
-                encoded_mass.astype(np.float64) / 1000.0
-                + legacy_fof_log10_offset
-            )
-            mask = positive_mass & (decoded_log10_mass > log10_mass_limit)
-            if isinstance(halos, pa.Table):
-                halos = halos.filter(pa.array(mask))
-            else:
-                halos = {name: np.asarray(value)[mask] for name, value in halos.items()}
-
-        if isinstance(halos, pa.Table):
-            if include_ia_shapes:
-                inertia_tensor = reconstruct_inertia_tensor_halo_snapshot(halos)
-            center_values = halos['halo_center'].combine_chunks().values.to_numpy()
-            centers = center_values.reshape(-1, 3)
-        else:
-            if include_ia_shapes:
-                inertia_tensor = np.asarray(halos['inertia_tensor'])
-            centers = np.asarray(halos['halo_center'])
-        # Store one canonical convention in every assembled lightcone:
-        # log10(M/Msun) * 1000.  Flamingo_big snapshot catalogues use the
-        # legacy convention (log10(M/Msun) - 4) * 1000, whereas the newer
-        # catalogues and native binary fallback already use the canonical one.
-        if isinstance(halos, pa.Table):
-            M = halos['log10M'].combine_chunks().to_numpy().copy()
-            rmax = halos['rmax'].combine_chunks().to_numpy()
-        else:
-            M = np.asarray(halos['log10M']).copy()
-            rmax = np.asarray(halos['rmax'])
-        if legacy_fof_log10_offset:
-            M = np.where(
-                M > 0,
-                np.rint(M.astype(np.float64) + 1000.0 * legacy_fof_log10_offset),
-                0,
-            ).astype(np.uint16)
-        # there might be SO masses and radius
-        if has_native_m200c:
-            M200c = halos['log10M200c'].combine_chunks().to_numpy()
-            r200c = halos['r200c'].combine_chunks().to_numpy()
-
-            output = {
-                'x': centers[:, 0],
-                'y': centers[:, 1],
-                'z': centers[:, 2],
-                'rhalf': rmax,
-                'r200c': r200c,
-                'M200c': M200c,
-                'M': M,
-            }
-            if include_ia_shapes:
-                output['inertia_tensor'] = inertia_tensor
-            return output
-
-        else:
-    
-            output = {
-                'x': centers[:, 0],
-                'y': centers[:, 1],
-                'z': centers[:, 2],
-                'rhalf': rmax,
-                'M': M,
-            }
-            if include_ia_shapes:
-                output['inertia_tensor'] = inertia_tensor
-            return output
 
     def may_intersect_sphere(x_i, y_i, z_i, Lbox_Mpc, d_min, d_max):
         """
@@ -326,10 +189,22 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapsh
 
     Lbox_Mpc = sims_parameters['dBoxSize Mpc/h']/ sims_parameters['h']
 
+    # Snapshot radial edges in comoving Mpc for this cosmology, whatever the
+    # distance convention of the shell table (shells_info is not modified).
+    edge_near, edge_far, edge_info = shell_radial_edges_Mpc(
+        shells_info, sims_parameters, convention=distance_convention)
+    print(f"save_halocatalog: shell distance columns identified as "
+          f"{edge_info.get('dialect', 'not checked')}; radial edges from {edge_info['convention']}")
+    provenance = {
+        'distance_convention': edge_info['convention'],
+        'distance_columns_dialect': str(edge_info.get('dialect', 'not checked')),
+        'max_redshift': repr(float(max_redshift)),
+        'log10_mass_limit': repr(log10_mass_limit),
+        'units': 'positions and radial edges in comoving Mpc; redshift = z(chi) for the run cosmology',
+    }
+    snapshot_formats = set()
+    so_columns = None
 
-
-    
-    
     partial_path = f"{os.fspath(catalog_path)}.partial"
     if os.path.exists(partial_path):
         raise FileExistsError(
@@ -342,23 +217,31 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapsh
     try:
         # Preserve the historical row ordering: shell, replica, source row.
         for i in frogress.bar(shell_indices[::-1]):
-            d_min = max(0.0, float(shells_info['cmd_near'][i]))
+            d_min = max(0.0, float(edge_near[i]))
             d_max = min(
-                float(shells_info['cmd_far'][i]),
+                float(edge_far[i]),
                 maximum_distance,
             )
             if d_max <= d_min:
                 continue
             step = shells_info['Step'][i]
 
-            output_ = load_snapshot(
+            output_ = load_halo_snapshot(
                 halo_snapshots_path,
                 step,
-                Lbox_Mpc,
                 sims_parameters,
                 log10_mass_limit=log10_mass_limit,
                 include_ia_shapes=include_ia_shapes,
             )
+            snapshot_formats.add(output_['format'])
+            # One schema for the whole lightcone: SO columns only if the
+            # snapshots carry SO data (decided by the first snapshot with halos).
+            if so_columns is None and len(output_['M']):
+                so_columns = output_['has_so']
+            if so_columns is False and output_['has_so']:
+                raise ValueError(
+                    f"Step {step} carries SO masses but earlier snapshots do not "
+                    f"({output_['path']})")
             shell_index = len(shells_info['Step']) - 1 - i
             replicas_max = int(np.ceil(d_max / Lbox_Mpc))
 
@@ -427,13 +310,13 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapsh
                                 'host_e2_x10000': encoded_e2,
                                 'shape_valid': shape_valid.astype(bool),
                             })
-                        if 'M200c' in output_:
+                        if so_columns:
                             columns['log_M200c_SO'] = np.asarray(
                                 output_['M200c'][mask], dtype=np.uint16
-                            )
+                            ) if 'M200c' in output_ else np.zeros(len(ra), np.uint16)
                             columns['R200c_S0'] = np.asarray(
                                 output_['r200c'][mask], dtype=np.uint16
-                            )
+                            ) if 'r200c' in output_ else np.zeros(len(ra), np.uint16)
 
                         table = pa.table(columns)
                         if writer is None:
@@ -454,6 +337,11 @@ def save_halocatalog(shells_info, sims_parameters, max_redshift=1.5, halo_snapsh
             gc.collect()
     finally:
         if writer is not None:
+            if hasattr(writer, 'add_key_value_metadata'):
+                provenance['snapshot_formats'] = ','.join(sorted(snapshot_formats))
+                writer.add_key_value_metadata(
+                    {f'lss_forward_model.halo_lightcone.{key}': value
+                     for key, value in provenance.items()})
             writer.close()
 
     if total_rows == 0:

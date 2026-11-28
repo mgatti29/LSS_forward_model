@@ -47,7 +47,11 @@ def build_z_values_file(directory, out_name, out_dir, sims_parameters=None):
              if abs(wa) > 0 else
              wCDM(H0=H0, Om0=Om0, w0=w0, Ode0=1-Om0))
 
-    cmd = cosmo.comoving_distance(z).value  # Mpc
+    # χ(z) in Mpc for the run's (w0, wa). save_halocatalog derives the same
+    # edges from the redshift columns when a z_values.txt is not in this
+    # convention (e.g. the Gower St files, h·χ_{w=-1} in Mpc/h).
+    from .halo_inputs import shell_comoving_distance_Mpc
+    cmd = shell_comoving_distance_Mpc(z, sims_parameters)  # Mpc
 
     # pair-wise far/near
     s = step[1:]
@@ -179,32 +183,11 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
     If parquet exists already and .fofstats.0 is present, just verify then delete the .fofstats.0.
     """
 
-    # ---- cosmology & mass unit factors
-    Om0 = float(sims_parameters["Omega_m"])
-    w0  = float(sims_parameters["w0"])
-    wa  = float(sims_parameters["wa"])
-    H0  = float(sims_parameters["h"]) * 100.0
-    Lbox_Mpc = float(sims_parameters["dBoxSize Mpc/h"]) / float(sims_parameters["h"])
+    # The record layout and the column encoding are defined once in
+    # halo_inputs, which also reads native binaries for save_halocatalog, so
+    # parquet and native inputs give identical halo properties.
+    from .halo_inputs import read_fof_binary, encode_fof_records
 
-    cosmo = Flatw0waCDM(H0=H0, Om0=Om0, w0=w0, wa=wa) if abs(wa) > 0 else wCDM(H0=H0, Om0=Om0, w0=w0, Ode0=1-Om0)
-
-    Lbox = Lbox_Mpc * u.Mpc
-    f_mass = (Lbox**3 * cosmo.critical_density(0).to(u.Msun/u.Mpc**3)).value  # Msun
-
-    # ---- PKDGRAV halo dtype (as you had it)
-    pkd_halo_dtype_old = np.dtype([
-        ("rPot", ("f4", 3)), ("minPot", "f4"), ("rcen", ("f4", 3)),
-        ("rcom", ("f4", 3)), ("cvom", ("f4", 3)), ("angular", ("f4", 3)),
-        ("inertia", ("f4", 6)), ("sigma", "f4"), ("rMax", "f4"),
-        ("fMAss", "f4"), ("fEnvironDensity0", "f4"),
-        ("fEnvironDensity1", "f4"), ("rHalf", "f4")
-    ])
-
-    pkd_halo_dtype_so = np.dtype(pkd_halo_dtype_old.descr + [
-      ("r200c", "f4"),
-      ("m200c", "f4"),
-    ])
-    
     def fof_path(shell):    return f"{base_dir}/run.00{int(shell):03d}.fofstats.0"
     def pq_path(shell):     return f"{base_dir}/run.00{int(shell):03d}.fofstats.parquet"
 
@@ -219,59 +202,21 @@ def convert_fof_and_cleanup(base_dir, resume, sims_parameters, z_max_for_convert
             if not os.path.exists(dst):
                 # convert only when z condition holds and source exists
                 if z_far < z_max_for_convert and os.path.exists(src):
-                    #halos = np.fromfile(src, dtype=pkd_halo_dtype)
-
-                    file_size = os.path.getsize(src)
-                    
-                    if file_size % pkd_halo_dtype_so.itemsize == 0:
-                      halos = np.fromfile(src, dtype=pkd_halo_dtype_so)
-                      has_so = True
-                    elif file_size % pkd_halo_dtype_old.itemsize == 0:
-                      halos = np.fromfile(src, dtype=pkd_halo_dtype_old)
-                      has_so = False
-                    else:
-                      raise ValueError(
-                          f"Cannot infer FOF dtype for {src}: size={file_size}, "
-                          f"old record={pkd_halo_dtype_old.itemsize}, new record={pkd_halo_dtype_so.itemsize}"
-                      )
-
-
+                    # Layout (legacy 112 B or SO 120 B records) from the file
+                    # size; sizes divisible by both are resolved by checking
+                    # which decoding gives physical records.
+                    halos, has_so = read_fof_binary(src)
 
                     if halos.size == 0:
                         print(f"[shell {shell:03d}] empty FOF file; skipping")
                         continue
 
-                    # features (your formulas, compacted)
-                    halo_center = Lbox_Mpc * (halos["rPot"] + halos["rcen"] + 0.5)    # shape (N,3)
-                    rmax        = (Lbox_Mpc * halos["rMax"] * 1000).astype("uint16")  # kpc in uint16
-                    log10M      = (np.log10(halos["fMAss"] * f_mass) * 1000).astype("uint16")
-
-                    if has_so:
-                        r200c = (Lbox_Mpc * halos["r200c"] * 1000).astype("uint16")  # kpc
-                        log10M200c = (np.log10(halos["m200c"] * f_mass) * 1000).astype("uint16")
-                    else:
-                        r200c = np.zeros(halos.size, dtype="uint16")
-                        log10M200c = np.zeros(halos.size, dtype="uint16")
-
-                        
-                      
-                    # inertia autos: take (0,3,5) diagonals, log10 scaled
-                    pm = np.empty((halos.size, 3), dtype=np.float32)
-                    pm[:, 0] = halos["inertia"][:, 0]
-                    pm[:, 1] = halos["inertia"][:, 3]
-                    pm[:, 2] = halos["inertia"][:, 5]
-                    inertia_auto = (np.log10(pm * 1e20) * 1000).astype("uint16")
-
-                    # inertia crosses normalized: (1,2,4)
-                    cross = np.empty((halos.size, 3), dtype=np.float32)
-                    cross[:, 0] = halos["inertia"][:, 1] / np.sqrt(pm[:, 0] * pm[:, 1])
-                    cross[:, 1] = halos["inertia"][:, 2] / np.sqrt(pm[:, 0] * pm[:, 2])
-                    cross[:, 2] = halos["inertia"][:, 4] / np.sqrt(pm[:, 1] * pm[:, 2])
-                    inertia_cross = (10000 * (1 + cross)).astype("uint16")
-
-                    # angular: signed log scale
-                    angular = (np.sign(halos["angular"]) * np.log10(np.abs(halos["angular"]) * 1e20 + 1) * 1000).astype("int16")
-
+                    enc = encode_fof_records(halos, has_so, sims_parameters)
+                    halo_center = enc["halo_center"]
+                    rmax, log10M = enc["rmax"], enc["log10M"]
+                    r200c, log10M200c = enc["r200c"], enc["log10M200c"]
+                    inertia_auto, inertia_cross = enc["inertia_auto"], enc["inertia_cross"]
+                    angular = enc["angular"]
 
                     df = pd.DataFrame({
                       "halo_center":   halo_center.tolist(),
