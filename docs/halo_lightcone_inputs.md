@@ -111,3 +111,27 @@ Use `halo_inputs.shell_radial_edges_Mpc` instead.
   shell tables.
 - `utilities/halo_lightcone_equivalence.py NATIVE NERSC OUT` runs the same
   comparison on a real simulation available in both layouts.
+
+## Validation on real simulations (2026-11-28)
+
+- **run877** (Gower St, Tursa; w0 = −0.63, wa = −2.57, 1250 Mpc/h). The run was read
+  natively (FoF tarball plus the Gower `z_values.txt`) and after the NERSC preprocessing:
+  - Snapshots are identical halo by halo, including inertia tensors: 78 steps,
+    9.6·10⁸ halos.
+  - The lightcones agree to within 6·10⁻⁶ of the rows (z < 1, log M > 13: 29.35 M halos; z < 2,
+    log M > 13.5 with shapes: 10.4 M). Every halo that is only in one of them lies
+    within 10⁻⁴ in z of a snapshot edge, because the file prints χ with 6 decimals. Both reach
+    `max_redshift` and use every expected step.
+  - Before the fix, the native layout stopped at z = 0.62 with 9.5 M halos taken from the
+    wrong snapshots.
+  - The 3 record sizes divisible by both layouts (steps 48, 54, 76 below z = 2) were
+    decoded as SO by the old `convert_fof_and_cleanup`, which gave garbage records.
+- **Fiducial ΛCDM and runsU** (NERSC, w0 = −1.80), z < 1, log M > 13:
+  - On the package `z_values.txt`, the new code is identical to the previous version in
+    every column.
+  - On a Gower-dialect rewrite of the same file, it differs only for 0.002% of halos,
+    all at snapshot edges.
+
+Above z ≈ 1.3, about 0.02% of halos lie up to 3·10⁻⁴ in z outside their snapshot's
+range in both layouts. The radial edges use astropy's χ(z) without neutrinos, while the
+halo redshifts use CCL with Σm_ν, so the two differ slightly. This is unchanged by this fix.
